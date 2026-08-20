@@ -1,0 +1,579 @@
+from __future__ import annotations
+
+import os
+import sqlite3
+from contextlib import contextmanager
+from datetime import date, datetime
+from pathlib import Path
+from typing import Iterable
+
+DATE_FMT = "%Y-%m-%d"
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def progress_delta(planned, actual) -> int:
+    try:
+        return int(round(float(actual))) - int(round(float(planned)))
+    except Exception:
+        return 0
+
+
+def calc_progress_status(start_s: str, end_s: str, planned, actual, status_date: date | None = None) -> str:
+    status_date = status_date or date.today()
+    try:
+        planned = int(round(float(planned)))
+        actual = int(round(float(actual)))
+    except Exception:
+        return "Chưa xác định"
+    if actual >= 100:
+        return "Hoàn thành"
+    try:
+        start = datetime.strptime(start_s, DATE_FMT).date()
+        end = datetime.strptime(end_s, DATE_FMT).date()
+    except Exception:
+        return "Chưa xác định"
+    if status_date < start and actual <= 0:
+        return "Chưa bắt đầu"
+    if status_date > end:
+        return "Chậm tiến độ"
+    delta = actual - planned
+    if delta < -1:
+        return "Chậm tiến độ"
+    if delta > 1:
+        return "Nhanh tiến độ"
+    return "Đúng tiến độ"
+
+
+def calculate_delay_days(end_s: str, actual, actual_finish_date: str = "", status_date: date | None = None) -> int:
+    """Số ngày vượt ngày Kết thúc; khi TT=100% khóa tại ngày đạt 100%."""
+    status_date = status_date or date.today()
+    try:
+        end = datetime.strptime(str(end_s), DATE_FMT).date()
+        actual = int(round(float(actual)))
+    except Exception:
+        return 0
+    if actual >= 100:
+        if not actual_finish_date:
+            return 0
+        try:
+            finish = datetime.strptime(str(actual_finish_date), DATE_FMT).date()
+        except Exception:
+            return 0
+        return max(0, (finish - end).days)
+    return max(0, (status_date - end).days)
+
+
+def planned_progress(start_s: str, finish_s: str, status_date: date | None = None) -> int:
+    status_date = status_date or date.today()
+    try:
+        start = datetime.strptime(start_s, DATE_FMT).date()
+        finish = datetime.strptime(finish_s, DATE_FMT).date()
+    except Exception:
+        return 0
+    if finish < start or status_date < start:
+        return 0
+    if status_date >= finish:
+        return 100
+    total = max(1, (finish - start).days + 1)
+    elapsed = max(0, (status_date - start).days + 1)
+    return max(0, min(100, round(elapsed * 100 / total)))
+
+
+class CloudDatabase:
+    """SQLite backend used by the Streamlit build.
+
+    On Render, use a Persistent Disk mounted at /var/data for durable SQLite storage.
+    The UI therefore exposes DB backup/restore and stores uploaded attachments
+    inside the DB instead of keeping client-side Windows paths.
+    """
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.create_tables()
+        self.migrate()
+
+    @contextmanager
+    def connect(self):
+        conn = sqlite3.connect(self.path, timeout=60, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=60000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def create_tables(self):
+        with self.connect() as c:
+            c.executescript("""
+            CREATE TABLE IF NOT EXISTS projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                start_date TEXT DEFAULT '',
+                end_date TEXT DEFAULT '',
+                manager TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                source_mpp_path TEXT DEFAULT '',
+                last_sync TEXT DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                wbs TEXT DEFAULT '',
+                name TEXT NOT NULL,
+                responsible TEXT DEFAULT '',
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                duration REAL DEFAULT 1,
+                planned_progress INTEGER DEFAULT 0,
+                actual_progress INTEGER DEFAULT 0,
+                actual_override INTEGER DEFAULT NULL,
+                actual_update_date TEXT DEFAULT '',
+                actual_finish_date TEXT DEFAULT '',
+                status TEXT DEFAULT 'Chưa bắt đầu',
+                predecessor TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                source_type TEXT DEFAULT 'manual',
+                source_uid INTEGER,
+                source_task_id INTEGER,
+                outline_level INTEGER DEFAULT 1,
+                is_summary INTEGER DEFAULT 0,
+                is_milestone INTEGER DEFAULT 0,
+                critical INTEGER DEFAULT 0,
+                total_slack REAL DEFAULT 0,
+                resource_names TEXT DEFAULT '',
+                baseline_start TEXT DEFAULT '',
+                baseline_finish TEXT DEFAULT '',
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                doc_type TEXT NOT NULL,
+                code TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                discipline TEXT DEFAULT '',
+                contractor TEXT DEFAULT '',
+                issuer TEXT DEFAULT '',
+                assignee TEXT DEFAULT '',
+                issue_date TEXT DEFAULT '',
+                due_date TEXT DEFAULT '',
+                closed_date TEXT DEFAULT '',
+                status TEXT DEFAULT '',
+                priority TEXT DEFAULT 'Trung bình',
+                related_wbs TEXT DEFAULT '',
+                description TEXT DEFAULT '',
+                response TEXT DEFAULT '',
+                cost_impact REAL DEFAULT 0,
+                time_impact_days INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT '',
+                updated_at TEXT DEFAULT '',
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                UNIQUE(project_id, doc_type, code)
+            );
+
+            CREATE TABLE IF NOT EXISTS document_attachments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL,
+                file_path TEXT DEFAULT '',
+                file_name TEXT DEFAULT '',
+                mime_type TEXT DEFAULT '',
+                file_content BLOB,
+                drive_file_id TEXT DEFAULT '',
+                drive_web_url TEXT DEFAULT '',
+                storage_backend TEXT DEFAULT 'sqlite',
+                created_at TEXT DEFAULT '',
+                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS drawings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                drawing_type TEXT NOT NULL,
+                drawing_no TEXT NOT NULL,
+                title TEXT NOT NULL,
+                discipline TEXT DEFAULT '',
+                revision TEXT DEFAULT '',
+                issuer TEXT DEFAULT '',
+                receiver TEXT DEFAULT '',
+                received_date TEXT DEFAULT '',
+                issue_date TEXT DEFAULT '',
+                status TEXT DEFAULT 'Mới nhận',
+                related_wbs TEXT DEFAULT '',
+                reference_no TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                file_updated_at TEXT DEFAULT '',
+                created_at TEXT DEFAULT '',
+                updated_at TEXT DEFAULT '',
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                UNIQUE(project_id, drawing_type, drawing_no, revision)
+            );
+
+            CREATE TABLE IF NOT EXISTS drawing_attachments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                drawing_id INTEGER NOT NULL,
+                file_path TEXT DEFAULT '',
+                file_name TEXT DEFAULT '',
+                mime_type TEXT DEFAULT '',
+                file_content BLOB,
+                drive_file_id TEXT DEFAULT '',
+                drive_web_url TEXT DEFAULT '',
+                storage_backend TEXT DEFAULT 'sqlite',
+                created_at TEXT DEFAULT '',
+                FOREIGN KEY(drawing_id) REFERENCES drawings(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
+            CREATE INDEX IF NOT EXISTS idx_documents_project_type ON documents(project_id, doc_type);
+            CREATE INDEX IF NOT EXISTS idx_drawings_project_type ON drawings(project_id, drawing_type);
+            """)
+
+    def _columns(self, c, table: str) -> set[str]:
+        return {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+
+    def migrate(self):
+        with self.connect() as c:
+            additions = {
+                "projects": {
+                    "source_mpp_path": "TEXT DEFAULT ''",
+                    "last_sync": "TEXT DEFAULT ''",
+                },
+                "tasks": {
+                    "source_type": "TEXT DEFAULT 'manual'", "source_uid": "INTEGER",
+                    "source_task_id": "INTEGER", "outline_level": "INTEGER DEFAULT 1",
+                    "is_summary": "INTEGER DEFAULT 0", "is_milestone": "INTEGER DEFAULT 0",
+                    "critical": "INTEGER DEFAULT 0", "total_slack": "REAL DEFAULT 0",
+                    "resource_names": "TEXT DEFAULT ''", "baseline_start": "TEXT DEFAULT ''",
+                    "baseline_finish": "TEXT DEFAULT ''", "actual_override": "INTEGER DEFAULT NULL",
+                    "actual_update_date": "TEXT DEFAULT ''", "actual_finish_date": "TEXT DEFAULT ''",
+                },
+                "document_attachments": {
+                    "mime_type": "TEXT DEFAULT ''", "file_content": "BLOB",
+                    "drive_file_id": "TEXT DEFAULT ''", "drive_web_url": "TEXT DEFAULT ''", "storage_backend": "TEXT DEFAULT 'sqlite'",
+                },
+                "drawing_attachments": {
+                    "mime_type": "TEXT DEFAULT ''", "file_content": "BLOB",
+                    "drive_file_id": "TEXT DEFAULT ''", "drive_web_url": "TEXT DEFAULT ''", "storage_backend": "TEXT DEFAULT 'sqlite'",
+                },
+                "drawings": {"file_updated_at": "TEXT DEFAULT ''"},
+            }
+            for table, cols in additions.items():
+                existing = self._columns(c, table)
+                for name, decl in cols.items():
+                    if name not in existing:
+                        c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_mpp_uid ON tasks(project_id, source_type, source_uid) WHERE source_uid IS NOT NULL")
+
+    # ---------- Projects ----------
+    def projects(self):
+        with self.connect() as c:
+            return c.execute("SELECT * FROM projects ORDER BY id DESC").fetchall()
+
+    def project(self, project_id: int):
+        with self.connect() as c:
+            return c.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+
+    def add_project(self, code, name, start_date="", end_date="", manager="", note="") -> int:
+        with self.connect() as c:
+            cur = c.execute(
+                "INSERT INTO projects(code,name,start_date,end_date,manager,note) VALUES(?,?,?,?,?,?)",
+                (code.strip(), name.strip(), start_date, end_date, manager.strip(), note.strip()),
+            )
+            return int(cur.lastrowid)
+
+    def update_project(self, project_id: int, code, name, start_date="", end_date="", manager="", note=""):
+        with self.connect() as c:
+            c.execute(
+                "UPDATE projects SET code=?,name=?,start_date=?,end_date=?,manager=?,note=? WHERE id=?",
+                (code.strip(), name.strip(), start_date, end_date, manager.strip(), note.strip(), project_id),
+            )
+
+    def delete_project(self, project_id: int):
+        with self.connect() as c:
+            c.execute("DELETE FROM projects WHERE id=?", (project_id,))
+
+    # ---------- Tasks ----------
+    def tasks(self, project_id: int, keyword="", status="Tất cả"):
+        sql = "SELECT * FROM tasks WHERE project_id=?"
+        params: list = [project_id]
+        if keyword:
+            k = f"%{keyword}%"
+            sql += " AND (name LIKE ? OR wbs LIKE ? OR responsible LIKE ? OR resource_names LIKE ?)"
+            params += [k, k, k, k]
+        if status and status != "Tất cả":
+            sql += " AND status=?"
+            params.append(status)
+        sql += " ORDER BY CASE WHEN source_type='mpp' THEN 0 ELSE 1 END, source_task_id, start_date, wbs, id"
+        with self.connect() as c:
+            return c.execute(sql, params).fetchall()
+
+    def task(self, task_id: int):
+        with self.connect() as c:
+            return c.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+
+    def add_task(self, project_id: int, data: dict) -> int:
+        planned = int(data.get("planned_progress", 0) or 0)
+        actual = int(data.get("actual_progress", 0) or 0)
+        status = calc_progress_status(data["start_date"], data["end_date"], planned, actual)
+        actual = max(0, min(100, int(data.get("actual_progress", 0) or 0)))
+        update_date = date.today().isoformat() if actual > 0 else ""
+        finish_date = date.today().isoformat() if actual >= 100 else ""
+        cols = [
+            "project_id", "wbs", "name", "responsible", "start_date", "end_date", "duration",
+            "planned_progress", "actual_progress", "actual_update_date", "actual_finish_date", "status", "predecessor", "note", "source_type",
+            "source_uid", "source_task_id", "outline_level", "is_summary", "is_milestone", "critical",
+            "total_slack", "resource_names", "baseline_start", "baseline_finish",
+        ]
+        defaults = dict(source_type="manual", source_uid=None, source_task_id=None, outline_level=1,
+                        is_summary=0, is_milestone=0, critical=0, total_slack=0, resource_names="",
+                        baseline_start="", baseline_finish="", actual_update_date=update_date, actual_finish_date=finish_date)
+        payload = {**defaults, **data, "project_id": project_id, "status": status}
+        with self.connect() as c:
+            cur = c.execute(
+                f"INSERT INTO tasks({','.join(cols)}) VALUES({','.join('?' for _ in cols)})",
+                [payload.get(k) for k in cols],
+            )
+            return int(cur.lastrowid)
+
+    def delete_task(self, task_id: int):
+        with self.connect() as c:
+            c.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+
+    def set_actual_override(self, task_id: int, actual: int, status_date: date | None = None):
+        actual = max(0, min(100, int(actual)))
+        status_date = status_date or date.today()
+        t = self.task(task_id)
+        if not t:
+            return "Chưa xác định", 0
+        finish_date = t["actual_finish_date"] or ""
+        if actual >= 100 and not finish_date:
+            finish_date = status_date.isoformat()
+        elif actual < 100:
+            finish_date = ""
+        status = calc_progress_status(t["start_date"], t["end_date"], t["planned_progress"], actual, status_date)
+        with self.connect() as c:
+            c.execute(
+                "UPDATE tasks SET actual_progress=?,actual_override=?,actual_update_date=?,actual_finish_date=?,status=? WHERE id=?",
+                (actual, actual, status_date.isoformat(), finish_date, status, task_id)
+            )
+        delay = calculate_delay_days(t["end_date"], actual, finish_date, status_date)
+        return status, delay
+
+    def recalc_planned(self, project_id: int, status_date: date):
+        rows = self.tasks(project_id)
+        with self.connect() as c:
+            for t in rows:
+                planned = planned_progress(t["start_date"], t["end_date"], status_date)
+                status = calc_progress_status(t["start_date"], t["end_date"], planned, t["actual_progress"], status_date)
+                c.execute("UPDATE tasks SET planned_progress=?,status=? WHERE id=?", (planned, status, t["id"]))
+
+    def sync_mpp_tasks(self, project_id: int, tasks: list[dict], source_name: str, project_info: dict | None = None):
+        project_info = project_info or {}
+        seen: list[int] = []
+        with self.connect() as c:
+            for d in tasks:
+                uid = int(d.get("source_uid") or 0)
+                if uid <= 0:
+                    continue
+                seen.append(uid)
+                old = c.execute(
+                    "SELECT * FROM tasks WHERE project_id=? AND source_type='mpp' AND source_uid=?",
+                    (project_id, uid),
+                ).fetchone()
+                actual_mpp = max(0, min(100, int(d.get("actual_progress", 0) or 0)))
+                actual = int(old["actual_override"]) if old and old["actual_override"] is not None else actual_mpp
+                status = calc_progress_status(d["start_date"], d["end_date"], d.get("planned_progress", 0), actual)
+                values = (
+                    d.get("wbs", ""), d.get("name", ""), d.get("responsible", ""),
+                    d["start_date"], d["end_date"], d.get("duration", 1), d.get("planned_progress", 0),
+                    actual, status, d.get("predecessor", ""), d.get("note", ""),
+                    d.get("task_id"), d.get("outline_level", 1), d.get("is_summary", 0),
+                    d.get("is_milestone", 0), d.get("critical", 0), d.get("total_slack", 0),
+                    d.get("resource_names", ""), d.get("baseline_start", ""), d.get("baseline_finish", ""),
+                )
+                if old:
+                    c.execute("""
+                        UPDATE tasks SET wbs=?,name=?,responsible=?,start_date=?,end_date=?,duration=?,
+                        planned_progress=?,actual_progress=?,status=?,predecessor=?,note=?,source_task_id=?,
+                        outline_level=?,is_summary=?,is_milestone=?,critical=?,total_slack=?,resource_names=?,
+                        baseline_start=?,baseline_finish=? WHERE id=?
+                    """, values + (old["id"],))
+                else:
+                    c.execute("""
+                        INSERT INTO tasks(project_id,wbs,name,responsible,start_date,end_date,duration,planned_progress,
+                        actual_progress,status,predecessor,note,source_type,source_uid,source_task_id,outline_level,
+                        is_summary,is_milestone,critical,total_slack,resource_names,baseline_start,baseline_finish)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """, (project_id,) + values[:11] + ("mpp", uid) + values[11:])
+            # Remove MPP tasks no longer present in the uploaded schedule.
+            if seen:
+                marks = ",".join("?" for _ in seen)
+                c.execute(
+                    f"DELETE FROM tasks WHERE project_id=? AND source_type='mpp' AND source_uid NOT IN ({marks})",
+                    [project_id] + seen,
+                )
+            start_date = project_info.get("start_date", "")
+            end_date = project_info.get("end_date", "")
+            manager = project_info.get("manager", "")
+            c.execute("""
+                UPDATE projects SET source_mpp_path=?,last_sync=?,
+                    start_date=CASE WHEN ?<>'' THEN ? ELSE start_date END,
+                    end_date=CASE WHEN ?<>'' THEN ? ELSE end_date END,
+                    manager=CASE WHEN ?<>'' THEN ? ELSE manager END
+                WHERE id=?
+            """, (source_name, _now(), start_date, start_date, end_date, end_date, manager, manager, project_id))
+
+    # ---------- Documents ----------
+    def documents(self, project_id: int, doc_type: str):
+        with self.connect() as c:
+            return c.execute(
+                """SELECT d.*, (SELECT COUNT(*) FROM document_attachments a WHERE a.document_id=d.id) attachment_count
+                   FROM documents d WHERE project_id=? AND doc_type=? ORDER BY issue_date DESC,id DESC""",
+                (project_id, doc_type),
+            ).fetchall()
+
+    def document(self, doc_id: int):
+        with self.connect() as c:
+            return c.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+
+    def save_document(self, project_id: int, doc_type: str, data: dict, doc_id: int | None = None) -> int:
+        fields = ["code","subject","discipline","contractor","issuer","assignee","issue_date","due_date","closed_date",
+                  "status","priority","related_wbs","description","response","cost_impact","time_impact_days"]
+        vals = [data.get(f, "") for f in fields]
+        with self.connect() as c:
+            if doc_id:
+                c.execute(
+                    f"UPDATE documents SET {','.join(f'{f}=?' for f in fields)},updated_at=? WHERE id=?",
+                    vals + [_now(), doc_id],
+                )
+                return doc_id
+            cur = c.execute(
+                f"INSERT INTO documents(project_id,doc_type,{','.join(fields)},created_at,updated_at) VALUES(?,?,{','.join('?' for _ in fields)},?,?)",
+                [project_id, doc_type] + vals + [_now(), _now()],
+            )
+            return int(cur.lastrowid)
+
+    def delete_document(self, doc_id: int):
+        with self.connect() as c:
+            c.execute("DELETE FROM documents WHERE id=?", (doc_id,))
+
+    def add_document_attachments(self, doc_id: int, files: Iterable[tuple[str, str, bytes]]):
+        with self.connect() as c:
+            for name, mime, content in files:
+                c.execute(
+                    "INSERT INTO document_attachments(document_id,file_name,mime_type,file_content,created_at) VALUES(?,?,?,?,?)",
+                    (doc_id, name, mime or "application/octet-stream", sqlite3.Binary(content), _now()),
+                )
+
+    def add_document_drive_attachment(self, doc_id: int, name: str, mime: str, drive_file_id: str, drive_web_url: str):
+        with self.connect() as c:
+            c.execute(
+                "INSERT INTO document_attachments(document_id,file_name,mime_type,drive_file_id,drive_web_url,storage_backend,created_at) VALUES(?,?,?,?,?,'gdrive',?)",
+                (doc_id, name, mime or "application/octet-stream", drive_file_id, drive_web_url, _now()),
+            )
+
+    def document_attachments(self, doc_id: int):
+        with self.connect() as c:
+            return c.execute("SELECT * FROM document_attachments WHERE document_id=? ORDER BY id DESC", (doc_id,)).fetchall()
+
+    def delete_document_attachment(self, attachment_id: int):
+        with self.connect() as c:
+            c.execute("DELETE FROM document_attachments WHERE id=?", (attachment_id,))
+
+    # ---------- Drawings ----------
+    def drawings(self, project_id: int, drawing_type: str):
+        with self.connect() as c:
+            return c.execute(
+                """SELECT d.*, (SELECT COUNT(*) FROM drawing_attachments a WHERE a.drawing_id=d.id) attachment_count
+                   FROM drawings d WHERE project_id=? AND drawing_type=? ORDER BY received_date DESC,id DESC""",
+                (project_id, drawing_type),
+            ).fetchall()
+
+    def drawing(self, drawing_id: int):
+        with self.connect() as c:
+            return c.execute("SELECT * FROM drawings WHERE id=?", (drawing_id,)).fetchone()
+
+    def save_drawing(self, project_id: int, drawing_type: str, data: dict, drawing_id: int | None = None) -> int:
+        fields = ["drawing_no","title","discipline","revision","issuer","receiver","received_date","issue_date","status",
+                  "related_wbs","reference_no","note"]
+        vals = [data.get(f, "") for f in fields]
+        with self.connect() as c:
+            if drawing_id:
+                c.execute(
+                    f"UPDATE drawings SET {','.join(f'{f}=?' for f in fields)},updated_at=? WHERE id=?",
+                    vals + [_now(), drawing_id],
+                )
+                return drawing_id
+            cur = c.execute(
+                f"INSERT INTO drawings(project_id,drawing_type,{','.join(fields)},created_at,updated_at) VALUES(?,?,{','.join('?' for _ in fields)},?,?)",
+                [project_id, drawing_type] + vals + [_now(), _now()],
+            )
+            return int(cur.lastrowid)
+
+    def delete_drawing(self, drawing_id: int):
+        with self.connect() as c:
+            c.execute("DELETE FROM drawings WHERE id=?", (drawing_id,))
+
+    def add_drawing_attachments(self, drawing_id: int, files: Iterable[tuple[str, str, bytes]]):
+        files = list(files)
+        if not files:
+            return
+        with self.connect() as c:
+            for name, mime, content in files:
+                c.execute(
+                    "INSERT INTO drawing_attachments(drawing_id,file_name,mime_type,file_content,created_at) VALUES(?,?,?,?,?)",
+                    (drawing_id, name, mime or "application/octet-stream", sqlite3.Binary(content), _now()),
+                )
+            stamp = _now()
+            c.execute("UPDATE drawings SET file_updated_at=?,updated_at=? WHERE id=?", (stamp, stamp, drawing_id))
+
+    def add_drawing_drive_attachment(self, drawing_id: int, name: str, mime: str, drive_file_id: str, drive_web_url: str):
+        with self.connect() as c:
+            c.execute(
+                "INSERT INTO drawing_attachments(drawing_id,file_name,mime_type,drive_file_id,drive_web_url,storage_backend,created_at) VALUES(?,?,?,?,?,'gdrive',?)",
+                (drawing_id, name, mime or "application/octet-stream", drive_file_id, drive_web_url, _now()),
+            )
+            stamp = _now()
+            c.execute("UPDATE drawings SET file_updated_at=?,updated_at=? WHERE id=?", (stamp, stamp, drawing_id))
+
+    def drawing_attachments(self, drawing_id: int):
+        with self.connect() as c:
+            return c.execute("SELECT * FROM drawing_attachments WHERE drawing_id=? ORDER BY id DESC", (drawing_id,)).fetchall()
+
+    def delete_drawing_attachment(self, attachment_id: int, drawing_id: int):
+        with self.connect() as c:
+            c.execute("DELETE FROM drawing_attachments WHERE id=?", (attachment_id,))
+            c.execute("UPDATE drawings SET file_updated_at=?,updated_at=? WHERE id=?", (_now(), _now(), drawing_id))
+
+    # ---------- Backup ----------
+    def backup_bytes(self) -> bytes:
+        # Checkpoint then read the single-file database.
+        with self.connect() as c:
+            c.execute("PRAGMA wal_checkpoint(FULL)")
+        return self.path.read_bytes() if self.path.exists() else b""
+
+    def restore_bytes(self, data: bytes):
+        if not data.startswith(b"SQLite format 3\x00"):
+            raise ValueError("File không phải SQLite database hợp lệ.")
+        tmp = self.path.with_suffix(".restore.tmp")
+        tmp.write_bytes(data)
+        conn = sqlite3.connect(tmp)
+        try:
+            check = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            if check != "ok":
+                raise ValueError(f"Database lỗi integrity_check: {check}")
+        finally:
+            conn.close()
+        os.replace(tmp, self.path)
+        self.create_tables()
+        self.migrate()

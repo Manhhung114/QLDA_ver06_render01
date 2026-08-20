@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/*.db
+data/*.sqlite*
+.streamlit/secrets.toml
+.DS_Store
+# Google OAuth / Drive secrets
+google_drive_client.json
+google_drive_token.json
+credentials*.json
+*.service-account.json
+
+# Render/local secrets and runtime data
+.env
+.env.*
+!.env.render.example
+.streamlit/secrets.toml
+*.db
+*.sqlite
+*.sqlite3
+/var/data/

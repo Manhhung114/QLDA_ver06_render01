@@ -1,0 +1,28 @@
+# DEMO ONLY: Render Free has no Persistent Disk. SQLite data can disappear after restart/redeploy.
+services:
+  - type: web
+    name: qlda-xaydung-v6-demo
+    runtime: docker
+    plan: free
+    region: singapore
+    autoDeployTrigger: commit
+    healthCheckPath: /_stcore/health
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    envVars:
+      - key: QLDA_DB_PATH
+        value: /tmp/qlda_cloud.db
+      - key: QLDA_RENDER_PERSISTENT_DISK
+        value: "false"
+      - key: QLDA_DRIVE_ENFORCE_RBAC
+        value: "true"
+      - key: QLDA_DRIVE_DIRECT_MAX_UPLOAD_MB
+        value: "2048"
+      - key: QLDA_DRIVE_LEGACY_MAX_UPLOAD_MB
+        value: "30"
+      - key: QLDA_DRIVE_TIMEOUT
+        value: "90"
+      - key: QLDA_DRIVE_WEBAPP_URL
+        sync: false
+      - key: QLDA_DRIVE_API_TOKEN
+        sync: false

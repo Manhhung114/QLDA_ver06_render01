@@ -1,0 +1,14 @@
+.git
+.github
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv
+.env
+.streamlit/secrets.toml
+*.db
+*.sqlite
+*.sqlite3
+outputs
