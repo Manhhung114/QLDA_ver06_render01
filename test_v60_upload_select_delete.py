@@ -8,7 +8,7 @@ assert 'Tải bản vẽ đã chọn' in s
 assert 'Tải hồ sơ đã chọn' in s
 assert 'Xóa bản vẽ đã chọn' in s
 assert 'Xóa hồ sơ đã chọn' in s
-assert 'Một dấu tick dùng chung' in s
+assert s.count('CheckboxColumn(') >= 2
 assert '✅ Có file (' in s
 assert 'Hoàn tất & cập nhật File DB' in s
 assert 'def record_file_counts(' in g

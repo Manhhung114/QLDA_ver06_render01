@@ -262,7 +262,7 @@ class ReportDashboardPage(QWidget):
         p2.add_chart(self.task_donut)
         grid.addWidget(p2, 0, 1)
 
-        p3 = ChartPanel("Tỷ lệ xử lý hồ sơ", "% hồ sơ đã đạt trạng thái kết thúc theo từng loại NCR/RFA/RFI/VO/nghiệm thu/kiểm định.")
+        p3 = ChartPanel("Tỷ lệ xử lý hồ sơ", "% hồ sơ đã đạt trạng thái kết thúc theo từng loại NCR/RFA/RFI/biên bản hiện trường/nghiệm thu/kiểm định.")
         self.doc_chart = HorizontalPercentWidget()
         p3.add_chart(self.doc_chart)
         grid.addWidget(p3, 1, 0)
@@ -334,7 +334,7 @@ class ReportDashboardPage(QWidget):
         doc_rows = []
         doc_total_all = 0
         doc_done_all = 0
-        doc_labels = {"NCR": "NCR", "RFA": "RFA", "RFI": "RFI", "VO": "VO", "NTCV": "NT công việc", "NTVL": "NT VL đầu vào", "KDVT": "Kiểm định VT"}
+        doc_labels = {"NCR": "NCR", "RFA": "RFA", "RFI": "RFI", "BBHT": "Biên bản hiện trường", "NTCV": "NT công việc", "NTVL": "NT VL đầu vào", "KDVT": "Kiểm định VT"}
         for doc_type, cfg in DOC_CONFIG.items():
             rows = self.db.conn.execute(
                 "SELECT status FROM documents WHERE project_id=? AND doc_type=?", (pid, doc_type)

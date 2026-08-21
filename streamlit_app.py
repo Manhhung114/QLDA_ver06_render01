@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import json
+import re
 import sqlite3
 import tempfile
 import time
@@ -77,15 +78,15 @@ DOC_CONFIG = {
         "assignee_label": "Người / Đơn vị phản hồi",
         "response_label": "Nội dung phản hồi",
     },
-    "VO": {
-        "title": "VO - Variation Order",
-        "statuses": ["Dự thảo", "Đã gửi", "Đang thương thảo", "Đã duyệt", "Từ chối", "Đóng"],
-        "done_statuses": ["Đã duyệt", "Từ chối", "Đóng"],
-        "subject": "Nội dung phát sinh / thay đổi",
-        "code_label": "Mã VO *",
-        "issuer_label": "Người đề xuất",
-        "assignee_label": "Người / Đơn vị phê duyệt",
-        "response_label": "Ý kiến / Quyết định",
+    "BBHT": {
+        "title": "Biên bản hiện trường",
+        "statuses": ["Mới lập", "Đã phát hành", "Đang xử lý", "Đã xử lý", "Đóng", "Hủy"],
+        "done_statuses": ["Đã xử lý", "Đóng", "Hủy"],
+        "subject": "Nội dung / Sự việc hiện trường",
+        "code_label": "Mã biên bản *",
+        "issuer_label": "Người / Đơn vị lập biên bản",
+        "assignee_label": "Người / Đơn vị xử lý",
+        "response_label": "Kết quả xử lý / Phản hồi",
     },
     "NTCV": {
         "title": "Hồ sơ nghiệm thu công việc",
@@ -140,6 +141,32 @@ DRAWING_STATUSES = [
     "Chấp thuận có điều kiện", "Cần sửa", "Thay thế", "Hủy",
 ]
 TASK_STATUSES = ["Tất cả", "Chưa bắt đầu", "Đúng tiến độ", "Nhanh tiến độ", "Chậm tiến độ", "Hoàn thành", "Đang thực hiện", "Chưa xác định"]
+
+EXECUTION_CODE_RE = re.compile(r"^[A-Z]+\d+-[A-Z0-9]+-\d{3,}$")
+
+def _normalize_execution_code(value: str) -> str:
+    value = re.sub(r"\s+", "", str(value or "").upper())
+    value = re.sub(r"-+", "-", value)
+    return value.strip("-")
+
+def _valid_execution_code(value: str) -> bool:
+    return bool(EXECUTION_CODE_RE.fullmatch(_normalize_execution_code(value)))
+
+def _tower_from_code(value: str) -> str:
+    code = _normalize_execution_code(value)
+    first = code.split("-", 1)[0] if code else ""
+    return first if first else "KHÁC"
+
+def _discipline_from_code(value: str) -> str:
+    parts = _normalize_execution_code(value).split("-")
+    return parts[1] if len(parts) >= 3 else ""
+
+def _file_filter_match(total_files: int, choice: str) -> bool:
+    if choice == "Có file":
+        return total_files > 0
+    if choice == "Chưa có file":
+        return total_files == 0
+    return True
 
 st.set_page_config(page_title="QLDA Xây dựng V6.0 • Render • Drive 2GB", page_icon="🏗️", layout="wide")
 
@@ -232,7 +259,7 @@ def sidebar_project_tools():
             start = c1.date_input("Bắt đầu", value=date.today())
             end = c2.date_input("Kết thúc", value=date.today() + timedelta(days=365))
             manager = st.text_input("Quản lý dự án")
-            note = st.text_area("Ghi chú")
+            note = ""
             submitted = st.form_submit_button("Tạo dự án", type="primary", disabled=not _is_admin())
             if submitted:
                 if not code.strip() or not name.strip():
@@ -334,7 +361,7 @@ def render_schedule(pid: int):
             planned = c1.number_input("KH %", 0, 100, value=0)
             actual = c2.number_input("TT %", 0, 100, value=0)
             predecessor = c3.text_input("Predecessor")
-            note = st.text_area("Ghi chú")
+            note = ""
             submit = st.form_submit_button("Thêm công việc", type="primary", disabled=not _can_update())
             if submit:
                 if not name.strip() or end < start:
@@ -700,7 +727,7 @@ def render_document_type(pid: int, doc_type: str):
 
     with st.form(f"doc_form_{pid}_{doc_type}_{selected or 'new'}"):
         c1, c2 = st.columns([1, 2])
-        code = c1.text_input(cfg.get("code_label", f"Mã {doc_type} *"), value=(record["code"] if record else ""))
+        code = c1.text_input(cfg.get("code_label", f"Mã {doc_type} *"), value=(record["code"] if record else ""), placeholder="S2-MEP-001")
         subject = c2.text_input(f"{cfg['subject']} *", value=(record["subject"] if record else ""))
         c1, c2, c3 = st.columns(3)
         discipline = c1.text_input("Bộ môn / Hệ", value=(record["discipline"] if record else ""))
@@ -718,16 +745,10 @@ def render_document_type(pid: int, doc_type: str):
         status_index = cfg["statuses"].index(record["status"]) if record and record["status"] in cfg["statuses"] else 0
         status = st.selectbox("Trạng thái", cfg["statuses"], index=status_index)
         related_wbs = st.text_input("WBS / Task liên quan", value=(record["related_wbs"] if record else ""))
-        description = st.text_area("Mô tả / Ghi chú", value=(record["description"] if record else ""))
+        description = st.text_area("Mô tả", value=(record["description"] if record else ""))
         response = st.text_area(cfg.get("response_label", "Phản hồi / Kết quả"), value=(record["response"] if record else ""))
-        if doc_type == "VO":
-            c1, c2 = st.columns(2)
-            cost_impact = c1.number_input("Giá trị phát sinh (đ)", value=float(record["cost_impact"] or 0) if record else 0.0, step=1_000_000.0, format="%.0f")
-            time_impact = c2.number_input("Ảnh hưởng tiến độ (ngày)", value=int(record["time_impact_days"] or 0) if record else 0, step=1)
-        else:
-            cost_impact, time_impact = 0.0, 0
+        cost_impact, time_impact = 0.0, 0
 
-        st.caption("V6.0: **Đính kèm file** nằm cạnh **Tải lên**. Khi vùng đính kèm đã mở: chọn tệp rồi bấm **⬆ Tải lên** màu xanh trong khung Google Drive; không tự tải khi vừa chọn file.")
         existing_panel_key = f"v6_doc_attach_{pid}_{doc_type}_{selected}" if selected else ""
         panel_is_open = bool(existing_panel_key and st.session_state.get(existing_panel_key + "_upload_open"))
         b_attach, b_save = st.columns([1, 1])
@@ -737,12 +758,16 @@ def render_document_type(pid: int, doc_type: str):
             save_clicked = st.form_submit_button("⬆️ Tải lên", type="primary", disabled=(not _can_update()) or panel_is_open, width="stretch")
 
         if attach_clicked or save_clicked:
-            if not code.strip() or not subject.strip():
-                st.error("Mã hồ sơ và nội dung là bắt buộc trước khi đính kèm/cập nhật.")
+            normalized_code = _normalize_execution_code(code)
+            if not normalized_code or not subject.strip():
+                st.error("Mã hồ sơ và nội dung là bắt buộc.")
+            elif not _valid_execution_code(normalized_code):
+                st.error("Mã phải theo định dạng THÁP-BỘMÔN-STT, ví dụ S2-MEP-001.")
             else:
                 try:
+                    effective_discipline = discipline.strip() or _discipline_from_code(normalized_code)
                     doc_id = db.save_document(pid, doc_type, {
-                        "code": code, "subject": subject, "discipline": discipline, "contractor": contractor,
+                        "code": normalized_code, "subject": subject, "discipline": effective_discipline, "contractor": contractor,
                         "issuer": issuer, "assignee": assignee, "issue_date": iso(issue_date), "due_date": iso(due_date),
                         "closed_date": iso(closed_date) if closed_enabled else "", "status": status, "priority": priority,
                         "related_wbs": related_wbs, "description": description, "response": response,
@@ -752,7 +777,7 @@ def render_document_type(pid: int, doc_type: str):
                     panel_key = f"v6_doc_attach_{pid}_{doc_type}_{doc_id}"
                     try:
                         _prepare_inline_upload_ticket(
-                            pid, kind="document", subtype=doc_type, record_code=code.strip(), panel_key=panel_key
+                            pid, kind="document", subtype=doc_type, record_code=normalized_code, panel_key=panel_key
                         )
                         if attach_clicked:
                             st.session_state[flash_key] = "Đã lưu hồ sơ và mở vùng chọn file. Chọn tệp rồi bấm Tải lên trong khung Google Drive."
@@ -792,7 +817,7 @@ def render_document_type(pid: int, doc_type: str):
                     if a["drive_file_id"]:
                         c2.link_button("⬇️ Tải xuống", f"https://drive.google.com/uc?export=download&id={a['drive_file_id']}", width="stretch")
                 else:
-                    c1.caption(f"{a['file_name']} — file cũ chỉ lưu đường dẫn desktop.")
+                    c1.write(a["file_name"])
                 if marked:
                     legacy_delete.append(a)
             if _is_admin() and st.button(f"🗑 Xóa file legacy đã tick ({len(legacy_delete)})", disabled=not legacy_delete, key=f"legacy_doc_delete_{selected}"):
@@ -804,20 +829,52 @@ def render_document_type(pid: int, doc_type: str):
 
     if rows:
         drive_counts = _record_drive_counts(pid, kind="document", subtype=doc_type, record_codes=[r["code"] for r in rows])
+
+        # Bộ lọc áp dụng thống nhất cho mọi sheet hồ sơ.
+        fc1, fc2, fc3, fc4, fc5 = st.columns([2.2, 1.0, 1.25, 1.35, 1.05])
+        filter_text = fc1.text_input("Tìm mã / nội dung / đơn vị", key=f"doc_filter_text_{pid}_{doc_type}")
+        towers = sorted({_tower_from_code(r["code"]) for r in rows if str(r["code"] or "").strip()})
+        disciplines = sorted({str(r["discipline"] or "").strip() for r in rows if str(r["discipline"] or "").strip()})
+        statuses = sorted({str(r["status"] or "").strip() for r in rows if str(r["status"] or "").strip()})
+        filter_tower = fc2.selectbox("Tháp", ["Tất cả"] + towers, key=f"doc_filter_tower_{pid}_{doc_type}")
+        filter_discipline = fc3.selectbox("Bộ môn/Hệ", ["Tất cả"] + disciplines, key=f"doc_filter_disc_{pid}_{doc_type}")
+        filter_status = fc4.selectbox("Trạng thái", ["Tất cả"] + statuses, key=f"doc_filter_status_{pid}_{doc_type}")
+        filter_file = fc5.selectbox("Tệp", ["Tất cả", "Có file", "Chưa có file"], key=f"doc_filter_file_{pid}_{doc_type}")
+
+        q = filter_text.strip().lower()
         table_rows = []
+        visible_row_ids = []
         for r in rows:
-            info = drive_counts.get(str(r["code"] or ""), {})
+            code_value = str(r["code"] or "")
+            info = drive_counts.get(code_value, {})
             direct_count = int(info.get("count") or 0)
             legacy_count = int(r["attachment_count"] or 0)
             total_files = direct_count + legacy_count
+            tower = _tower_from_code(code_value)
+            discipline_value = str(r["discipline"] or "").strip()
+            status_value = str(r["status"] or "").strip()
+            haystack = " ".join([code_value, str(r["subject"] or ""), discipline_value, str(r["contractor"] or ""), str(r["issuer"] or ""), str(r["assignee"] or "")]).lower()
+            if q and q not in haystack:
+                continue
+            if filter_tower != "Tất cả" and tower != filter_tower:
+                continue
+            if filter_discipline != "Tất cả" and discipline_value != filter_discipline:
+                continue
+            if filter_status != "Tất cả" and status_value != filter_status:
+                continue
+            if not _file_filter_match(total_files, filter_file):
+                continue
             file_label = f"✅ Có file ({total_files})" if total_files else "—"
             table_rows.append({
-                "Chọn": False, "ID": r["id"], "Mã": r["code"], "Nội dung": r["subject"], "Bộ môn": r["discipline"],
+                "Chọn": False, "ID": r["id"], "Tháp": tower, "Mã": code_value, "Nội dung": r["subject"], "Bộ môn": discipline_value,
                 "Nhà thầu": r["contractor"], "Phát hành": r["issue_date"], "Hạn": r["due_date"],
-                "Trạng thái": r["status"], "Mức độ": r["priority"], "Theo dõi hạn": document_deadline_label(r, doc_type),
+                "Trạng thái": status_value, "Mức độ": r["priority"], "Theo dõi hạn": document_deadline_label(r, doc_type),
                 "WBS/Task": r["related_wbs"], "File DB": file_label,
-                **({"Giá trị VO": r["cost_impact"], "Ảnh hưởng ngày": r["time_impact_days"]} if doc_type == "VO" else {}),
             })
+            visible_row_ids.append(int(r["id"]))
+        if not table_rows:
+            st.info("Không có hồ sơ phù hợp bộ lọc.")
+            return
         df = pd.DataFrame(table_rows)
         # V6 Render: một cột Chọn dùng chung cho cả Tải xuống và Xóa.
         # Chỉ các cột khác bị khóa; mọi quyền đều được tick để tải file.
@@ -826,12 +883,11 @@ def render_document_type(pid: int, doc_type: str):
             df,
             hide_index=True,
             width="stretch",
-            key=f"doc_select_grid_{pid}_{doc_type}_{len(rows)}_{sum(int(r['id']) for r in rows)}",
+            key=f"doc_select_grid_{pid}_{doc_type}_{len(visible_row_ids)}_{sum(visible_row_ids)}_{abs(hash((filter_text, filter_tower, filter_discipline, filter_status, filter_file))) % 100000}",
             disabled=disabled_cols,
             column_config={
                 "Chọn": st.column_config.CheckboxColumn(
                     "☑ Chọn",
-                    help="Tick hồ sơ cần tải xuống. Admin cũng dùng chính dấu tick này để xóa.",
                     default=False,
                 )
             },
@@ -874,7 +930,6 @@ def render_document_type(pid: int, doc_type: str):
             if errors:
                 st.error("Một số hồ sơ chưa xóa được vì lỗi Google Drive: " + " || ".join(errors))
             st.rerun()
-        d3.caption("☑ Một dấu tick dùng chung → **Tải hồ sơ đã chọn**; riêng Admin mới được dùng **Xóa**.")
 
         download_ids = [int(x) for x in (st.session_state.get(download_state_key) or [])]
         if download_ids:
@@ -886,9 +941,8 @@ def render_document_type(pid: int, doc_type: str):
 
 def render_documents(pid: int):
     st.subheader("📁 Quản lý hồ sơ")
-    st.caption("NCR • RFA • RFI • VO • Nghiệm thu công việc • Nghiệm thu vật liệu đầu vào • Kiểm định vật tư • File Google Drive")
-    doc_types = ["NCR", "RFA", "RFI", "VO", "NTCV", "NTVL", "KDVT"]
-    tab_names = ["NCR", "RFA", "RFI", "VO", "NT công việc", "NT vật liệu đầu vào", "Kiểm định vật tư"]
+    doc_types = ["NCR", "RFA", "RFI", "BBHT", "NTCV", "NTVL", "KDVT"]
+    tab_names = ["NCR", "RFA", "RFI", "Biên bản hiện trường", "NT công việc", "NT vật liệu đầu vào", "Kiểm định vật tư"]
     tabs = st.tabs(tab_names)
     for tab, doc_type in zip(tabs, doc_types):
         with tab:
@@ -923,10 +977,7 @@ def _render_selected_record_downloads(
     heading = "bản vẽ" if is_drawing else "hồ sơ"
     icon = "📐" if is_drawing else "📁"
     st.markdown(f"#### ⬇️ Tải {heading} đã chọn")
-    st.caption(
-        "File được tải **trực tiếp từ Google Drive**, không đi qua Render. "
-        "Nếu một dòng có nhiều file, bấm **Tải xuống** tương ứng từng file."
-    )
+    file_name_filter = st.text_input("Lọc tên file", key=panel_key + "_name_filter").strip().lower()
     total_files = 0
     missing: list[str] = []
     seen_file_ids: set[str] = set()
@@ -988,10 +1039,11 @@ def _render_selected_record_downloads(
         except Exception:
             pass
 
+        if file_name_filter:
+            files_for_record = [item for item in files_for_record if file_name_filter in str(item.get("name") or "").lower()]
+
         if not files_for_record:
             missing.append(record_code or f"ID {rid}")
-            with st.expander(f"{icon} {label} — chưa có file", expanded=False):
-                st.caption("Dòng này chưa có file hiện hành trên Google Drive.")
             continue
 
         total_files += len(files_for_record)
@@ -1073,7 +1125,7 @@ def render_drawing_type(pid: int, drawing_type: str):
 
     with st.form(f"drawing_form_{pid}_{drawing_type}_{selected or 'new'}"):
         c1, c2 = st.columns([1, 2])
-        number = c1.text_input("Mã bản vẽ *", value=(record["drawing_no"] if record else ""))
+        number = c1.text_input("Mã bản vẽ *", value=(record["drawing_no"] if record else ""), placeholder="S2-MEP-001")
         title = c2.text_input("Tên bản vẽ *", value=(record["title"] if record else ""))
         c1, c2, c3 = st.columns(3)
         discipline = c1.text_input("Bộ môn / Hệ", value=(record["discipline"] if record else ""))
@@ -1089,9 +1141,8 @@ def render_drawing_type(pid: int, drawing_type: str):
         issue = c2.date_input("Ngày phát hành", value=parse_date(record["issue_date"], date.today()) if record and record["issue_date"] else date.today(), disabled=not issue_enabled)
         related_wbs = st.text_input("WBS / Task / Khu vực liên quan", value=(record["related_wbs"] if record else ""))
         reference = st.text_input("Tham chiếu / Bản vẽ bị thay thế", value=(record["reference_no"] if record else ""))
-        note = st.text_area("Ghi chú", value=(record["note"] if record else ""))
+        note = record["note"] if record else ""
 
-        st.caption("V6.0: **Đính kèm file** nằm cạnh **Tải lên**. Khi vùng đính kèm đã mở: chọn tệp rồi bấm **⬆ Tải lên** màu xanh trong khung Google Drive; không tự tải khi vừa chọn file.")
         existing_panel_key = f"v6_drawing_attach_{pid}_{drawing_type}_{selected}" if selected else ""
         panel_is_open = bool(existing_panel_key and st.session_state.get(existing_panel_key + "_upload_open"))
         b_attach, b_save = st.columns([1, 1])
@@ -1101,12 +1152,16 @@ def render_drawing_type(pid: int, drawing_type: str):
             save_clicked = st.form_submit_button("⬆️ Tải lên", type="primary", disabled=(not _can_update()) or panel_is_open, width="stretch")
 
         if attach_clicked or save_clicked:
-            if not number.strip() or not title.strip():
-                st.error("Mã bản vẽ và Tên bản vẽ là bắt buộc trước khi đính kèm/cập nhật.")
+            normalized_number = _normalize_execution_code(number)
+            if not normalized_number or not title.strip():
+                st.error("Mã bản vẽ và Tên bản vẽ là bắt buộc.")
+            elif not _valid_execution_code(normalized_number):
+                st.error("Mã phải theo định dạng THÁP-BỘMÔN-STT, ví dụ S2-MEP-001.")
             else:
                 try:
+                    effective_discipline = discipline.strip() or _discipline_from_code(normalized_number)
                     drawing_id = db.save_drawing(pid, drawing_type, {
-                        "drawing_no": number, "title": title, "discipline": discipline, "revision": revision,
+                        "drawing_no": normalized_number, "title": title, "discipline": effective_discipline, "revision": revision,
                         "issuer": issuer, "receiver": receiver, "received_date": iso(received),
                         "issue_date": iso(issue) if issue_enabled else "", "status": status,
                         "related_wbs": related_wbs, "reference_no": reference, "note": note,
@@ -1115,7 +1170,7 @@ def render_drawing_type(pid: int, drawing_type: str):
                     panel_key = f"v6_drawing_attach_{pid}_{drawing_type}_{drawing_id}"
                     try:
                         _prepare_inline_upload_ticket(
-                            pid, kind="drawing", subtype=drawing_type, record_code=number.strip(), panel_key=panel_key
+                            pid, kind="drawing", subtype=drawing_type, record_code=normalized_number, panel_key=panel_key
                         )
                         if attach_clicked:
                             st.session_state[flash_key] = "Đã lưu bản vẽ và mở vùng chọn file. Chọn tệp rồi bấm Tải lên trong khung Google Drive."
@@ -1155,7 +1210,7 @@ def render_drawing_type(pid: int, drawing_type: str):
                     if a["drive_file_id"]:
                         c2.link_button("⬇️ Tải xuống", f"https://drive.google.com/uc?export=download&id={a['drive_file_id']}", width="stretch")
                 else:
-                    c1.caption(f"{a['file_name']} — file cũ chỉ lưu đường dẫn desktop.")
+                    c1.write(a["file_name"])
                 if marked:
                     legacy_delete.append(a)
             if _is_admin() and st.button(f"🗑 Xóa file legacy đã tick ({len(legacy_delete)})", disabled=not legacy_delete, key=f"legacy_drawing_delete_{selected}"):
@@ -1167,32 +1222,64 @@ def render_drawing_type(pid: int, drawing_type: str):
 
     if rows:
         drive_counts = _record_drive_counts(pid, kind="drawing", subtype=drawing_type, record_codes=[r["drawing_no"] for r in rows])
+
+        # Bộ lọc áp dụng thống nhất cho mọi sheet bản vẽ.
+        fc1, fc2, fc3, fc4, fc5 = st.columns([2.2, 1.0, 1.25, 1.35, 1.05])
+        filter_text = fc1.text_input("Tìm mã / tên / đơn vị", key=f"drawing_filter_text_{pid}_{drawing_type}")
+        towers = sorted({_tower_from_code(r["drawing_no"]) for r in rows if str(r["drawing_no"] or "").strip()})
+        disciplines = sorted({str(r["discipline"] or "").strip() for r in rows if str(r["discipline"] or "").strip()})
+        statuses = sorted({str(r["status"] or "").strip() for r in rows if str(r["status"] or "").strip()})
+        filter_tower = fc2.selectbox("Tháp", ["Tất cả"] + towers, key=f"drawing_filter_tower_{pid}_{drawing_type}")
+        filter_discipline = fc3.selectbox("Bộ môn/Hệ", ["Tất cả"] + disciplines, key=f"drawing_filter_disc_{pid}_{drawing_type}")
+        filter_status = fc4.selectbox("Trạng thái", ["Tất cả"] + statuses, key=f"drawing_filter_status_{pid}_{drawing_type}")
+        filter_file = fc5.selectbox("Tệp", ["Tất cả", "Có file", "Chưa có file"], key=f"drawing_filter_file_{pid}_{drawing_type}")
+
+        q = filter_text.strip().lower()
         table_rows = []
+        visible_row_ids = []
         for r in rows:
-            info = drive_counts.get(str(r["drawing_no"] or ""), {})
+            code_value = str(r["drawing_no"] or "")
+            info = drive_counts.get(code_value, {})
             direct_count = int(info.get("count") or 0)
             legacy_count = int(r["attachment_count"] or 0)
             total_files = direct_count + legacy_count
+            tower = _tower_from_code(code_value)
+            discipline_value = str(r["discipline"] or "").strip()
+            status_value = str(r["status"] or "").strip()
+            haystack = " ".join([code_value, str(r["title"] or ""), discipline_value, str(r["issuer"] or ""), str(r["receiver"] or ""), str(r["revision"] or "")]).lower()
+            if q and q not in haystack:
+                continue
+            if filter_tower != "Tất cả" and tower != filter_tower:
+                continue
+            if filter_discipline != "Tất cả" and discipline_value != filter_discipline:
+                continue
+            if filter_status != "Tất cả" and status_value != filter_status:
+                continue
+            if not _file_filter_match(total_files, filter_file):
+                continue
             file_label = f"✅ Có file ({total_files})" if total_files else "—"
             latest = str(info.get("latest_modified") or "").replace("T", " ").replace("Z", "")[:19] or r["file_updated_at"]
             table_rows.append({
-                "Chọn": False, "ID": r["id"], "Mã bản vẽ": r["drawing_no"], "Tên bản vẽ": r["title"], "Bộ môn/Hệ": r["discipline"],
+                "Chọn": False, "ID": r["id"], "Tháp": tower, "Mã bản vẽ": code_value, "Tên bản vẽ": r["title"], "Bộ môn/Hệ": discipline_value,
                 "Revision": r["revision"], "Đơn vị phát hành": r["issuer"], "Người nhận": r["receiver"],
-                "Ngày nhận": r["received_date"], "Ngày phát hành": r["issue_date"], "Trạng thái": r["status"],
+                "Ngày nhận": r["received_date"], "Ngày phát hành": r["issue_date"], "Trạng thái": status_value,
                 "WBS/Task": r["related_wbs"], "Tham chiếu/Thay thế": r["reference_no"], "File DB": file_label,
-                "Cập nhật file gần nhất": latest, "Ghi chú": r["note"],
+                "Cập nhật file gần nhất": latest,
             })
+            visible_row_ids.append(int(r["id"]))
+        if not table_rows:
+            st.info("Không có bản vẽ phù hợp bộ lọc.")
+            return
         df = pd.DataFrame(table_rows)
         # V6 Render: cột Chọn dùng chung cho tải xuống và xóa. Mọi quyền đều được tick để tải;
         # chỉ Admin mới được dùng nút xóa.
         disabled_cols = [c for c in df.columns if c != "Chọn"]
         edited = st.data_editor(
-            df, hide_index=True, width="stretch", key=f"drawing_select_grid_{pid}_{drawing_type}_{len(rows)}_{sum(int(r['id']) for r in rows)}",
+            df, hide_index=True, width="stretch", key=f"drawing_select_grid_{pid}_{drawing_type}_{len(visible_row_ids)}_{sum(visible_row_ids)}_{abs(hash((filter_text, filter_tower, filter_discipline, filter_status, filter_file))) % 100000}",
             disabled=disabled_cols,
             column_config={
                 "Chọn": st.column_config.CheckboxColumn(
                     "☑ Chọn",
-                    help="Tick bản vẽ cần tải xuống. Admin cũng có thể xóa các bản vẽ đã tick.",
                     default=False,
                 )
             },
@@ -1235,7 +1322,6 @@ def render_drawing_type(pid: int, drawing_type: str):
             if errors:
                 st.error("Một số bản vẽ chưa xóa được vì lỗi Google Drive: " + " || ".join(errors))
             st.rerun()
-        d3.caption("☑ Một dấu tick dùng chung → **Tải bản vẽ đã chọn**; riêng Admin mới được dùng **Xóa**.")
 
         download_ids = [int(x) for x in (st.session_state.get(download_state_key) or [])]
         if download_ids:
@@ -1248,7 +1334,6 @@ def render_drawing_type(pid: int, drawing_type: str):
 
 def render_drawings(pid: int):
     st.subheader("📐 Quản lý bản vẽ")
-    st.caption("Shopdrawing • BV phát hành TKTC • BV cập nhật • BV hoàn công • Đính kèm Google Drive 2 GB/file")
     keys = ["SHOPDRAWING", "ISSUED_DESIGN", "UPDATED", "AS_BUILT"]
     tabs = st.tabs([DRAWING_TYPES[k] for k in keys])
     for tab, key in zip(tabs, keys):
@@ -1259,9 +1344,6 @@ def render_drawings(pid: int):
 def render_reports(pid: int):
     st.subheader("📊 Báo cáo trực quan")
     project = db.project(pid)
-    if project:
-        st.caption(f"Dự án: {project['code']} - {project['name']}")
-
     tasks = db.tasks(pid)
     total_tasks = len(tasks)
     planned_avg = sum(float(t["planned_progress"] or 0) for t in tasks) / total_tasks if total_tasks else 0
@@ -1274,7 +1356,7 @@ def render_reports(pid: int):
     doc_summary = []
     doc_total_all = 0
     doc_done_all = 0
-    doc_labels = {"NCR":"NCR", "RFA":"RFA", "RFI":"RFI", "VO":"VO", "NTCV":"NT công việc", "NTVL":"NT VL đầu vào", "KDVT":"Kiểm định VT"}
+    doc_labels = {"NCR":"NCR", "RFA":"RFA", "RFI":"RFI", "BBHT":"Biên bản hiện trường", "NTCV":"NT công việc", "NTVL":"NT VL đầu vào", "KDVT":"Kiểm định VT"}
     for doc_type, cfg in DOC_CONFIG.items():
         rows = db.documents(pid, doc_type)
         total = len(rows)
@@ -2083,7 +2165,7 @@ def render_ai_assistant(pid: int):
         for msg in st.session_state[hkey]:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
-        q = st.chat_input("Hỏi về dự án: công việc trễ, RFI/NCR/VO, bản vẽ, rủi ro...", key=f"ai_chat_{pid}")
+        q = st.chat_input("Hỏi về dự án: công việc trễ, RFI/NCR/biên bản hiện trường, bản vẽ, rủi ro...", key=f"ai_chat_{pid}")
         if q:
             previous = list(st.session_state[hkey])
             st.session_state[hkey].append({"role": "user", "content": q})
@@ -2178,7 +2260,7 @@ def render_project_info(pid: int):
         start = c1.date_input("Bắt đầu", value=parse_date(p["start_date"], date.today()))
         end = c2.date_input("Kết thúc", value=parse_date(p["end_date"], date.today()+timedelta(days=365)))
         manager = st.text_input("Quản lý dự án", value=p["manager"] or "")
-        note = st.text_area("Ghi chú", value=p["note"] or "")
+        note = p["note"] or ""
         if st.form_submit_button("Lưu thông tin", type="primary", disabled=not _is_admin()):
             try:
                 db.update_project(pid, code, name, iso(start), iso(end), manager, note)

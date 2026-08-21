@@ -7,11 +7,11 @@ def test_v60_streamlit_inline_attachment_ui():
     text = (ROOT / "streamlit_app.py").read_text(encoding="utf-8")
     assert "QLDA Xây dựng V6.0" in text
     assert 'st.form_submit_button("📎 Đính kèm file"' in text
-    assert '"💾 Cập nhật" if selected else "💾 Lưu mới"' in text
+    assert 'st.form_submit_button("⬆️ Tải lên"' in text
     assert "components.iframe" in text
     assert "🗑 Xóa file đã chọn" in text
     assert "⬇️ Tải xuống" in text
-    for doc in ["NCR", "RFA", "RFI", "VO", "NTCV", "NTVL", "KDVT"]:
+    for doc in ["NCR", "RFA", "RFI", "BBHT", "NTCV", "NTVL", "KDVT"]:
         assert f'"{doc}"' in text
     for drawing in ["SHOPDRAWING", "ISSUED_DESIGN", "UPDATED", "AS_BUILT"]:
         assert f'"{drawing}"' in text

@@ -89,3 +89,28 @@ Dockerfile đã cài Java (`default-jre-headless`) để `mpxj` có thể đọc
 - Báo cáo trực quan
 - Văn bản QLDA, TVPL clickable
 - Trợ lý AI
+
+## Cấu trúc theo tháp
+Mã hồ sơ/bản vẽ mới dùng định dạng `THÁP-BỘMÔN-STT`, ví dụ `S2-MEP-001`.
+File Hồ sơ/Bản vẽ được lưu theo cấu trúc:
+
+```text
+QLDA Xây dựng/
+└── <Mã dự án>/
+    └── Tháp S2/
+        ├── 02_Ho_so/
+        │   ├── NCR/
+        │   ├── RFA/
+        │   ├── RFI/
+        │   ├── BBHT/
+        │   ├── NTCV/
+        │   ├── NTVL/
+        │   └── KDVT/
+        └── 03_Ban_ve/
+            ├── SHOPDRAWING/
+            ├── ISSUED_DESIGN/
+            ├── UPDATED/
+            └── AS_BUILT/
+```
+
+Các file đã lưu theo cấu trúc cũ vẫn được đọc để bảo đảm tương thích.

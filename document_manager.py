@@ -42,10 +42,10 @@ DOC_CONFIG = {
         "issuer_label": "Người gửi", "assignee_label": "Người/Đơn vị phản hồi", "response_label": "Nội dung phản hồi",
         "statuses": ["Đã gửi", "Chờ phản hồi", "Đã phản hồi", "Đóng", "Hủy"], "done_statuses": ["Đã phản hồi", "Đóng", "Hủy"],
     },
-    "VO": {
-        "title": "VO - Variation Order", "code_label": "Mã VO *", "subject_label": "Nội dung phát sinh / thay đổi *",
-        "issuer_label": "Người đề xuất", "assignee_label": "Người/Đơn vị phê duyệt", "response_label": "Ý kiến / Quyết định",
-        "statuses": ["Dự thảo", "Đã gửi", "Đang thương thảo", "Đã duyệt", "Từ chối", "Đóng"], "done_statuses": ["Đã duyệt", "Từ chối", "Đóng"],
+    "BBHT": {
+        "title": "Biên bản hiện trường", "code_label": "Mã biên bản *", "subject_label": "Nội dung / Sự việc hiện trường *",
+        "issuer_label": "Người/Đơn vị lập biên bản", "assignee_label": "Người/Đơn vị xử lý", "response_label": "Kết quả xử lý / Phản hồi",
+        "statuses": ["Mới lập", "Đã phát hành", "Đang xử lý", "Đã xử lý", "Đóng", "Hủy"], "done_statuses": ["Đã xử lý", "Đóng", "Hủy"],
     },
     "NTCV": {
         "title": "Hồ sơ nghiệm thu công việc", "code_label": "Mã hồ sơ NTCV *", "subject_label": "Hạng mục / Công việc nghiệm thu *",
@@ -730,7 +730,7 @@ class DocumentManagerPage(QWidget):
         title_box = QVBoxLayout()
         title = QLabel("QUẢN LÝ HỒ SƠ DỰ ÁN")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("NCR • RFA • RFI • VO • Nghiệm thu công việc • Nghiệm thu VL đầu vào • Kiểm định vật tư")
+        subtitle = QLabel("NCR • RFA • RFI • Biên bản hiện trường • Nghiệm thu công việc • Nghiệm thu VL đầu vào • Kiểm định vật tư")
         subtitle.setObjectName("subtitle")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
@@ -750,10 +750,10 @@ class DocumentManagerPage(QWidget):
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.type_tabs = {}
-        for doc_type in ("NCR", "RFA", "RFI", "VO", "NTCV", "NTVL", "KDVT"):
+        for doc_type in ("NCR", "RFA", "RFI", "BBHT", "NTCV", "NTVL", "KDVT"):
             tab = DocumentTypeTab(self.db, doc_type, self)
             self.type_tabs[doc_type] = tab
-            tab_label = {"NTCV": "NT công việc", "NTVL": "NT VL đầu vào", "KDVT": "Kiểm định vật tư"}.get(doc_type, doc_type)
+            tab_label = {"BBHT": "Biên bản hiện trường", "NTCV": "NT công việc", "NTVL": "NT VL đầu vào", "KDVT": "Kiểm định vật tư"}.get(doc_type, doc_type)
             self.tabs.addTab(tab, tab_label)
         root.addWidget(self.tabs, 1)
 

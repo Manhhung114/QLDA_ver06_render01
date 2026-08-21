@@ -76,7 +76,7 @@ class AIAssistantPage(QWidget):
     def _build_chat_tab(self):
         page = QWidget(); lay = QVBoxLayout(page)
         self.chat_view = QTextBrowser(); self.chat_view.setOpenExternalLinks(True)
-        self.chat_input = QTextEdit(); self.chat_input.setPlaceholderText("Ví dụ: 20 công việc rủi ro nhất? RFI nào đang quá hạn? VO nào ảnh hưởng tiến độ?"); self.chat_input.setFixedHeight(85)
+        self.chat_input = QTextEdit(); self.chat_input.setPlaceholderText("Ví dụ: 20 công việc rủi ro nhất? RFI nào đang quá hạn? Biên bản hiện trường nào cần xử lý?"); self.chat_input.setFixedHeight(85)
         row = QHBoxLayout()
         ask = QPushButton("Gửi câu hỏi"); ask.clicked.connect(self.ask_chat)
         clear = QPushButton("Xóa hội thoại"); clear.clicked.connect(self.clear_chat)
