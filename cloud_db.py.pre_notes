@@ -174,7 +174,6 @@ class CloudDatabase:
                 related_wbs TEXT DEFAULT '',
                 description TEXT DEFAULT '',
                 response TEXT DEFAULT '',
-                note TEXT DEFAULT '',
                 cost_impact REAL DEFAULT 0,
                 time_impact_days INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT '',
@@ -266,7 +265,6 @@ class CloudDatabase:
                     "mime_type": "TEXT DEFAULT ''", "file_content": "BLOB",
                     "drive_file_id": "TEXT DEFAULT ''", "drive_web_url": "TEXT DEFAULT ''", "storage_backend": "TEXT DEFAULT 'sqlite'",
                 },
-                "documents": {"note": "TEXT DEFAULT ''"},
                 "drawings": {"file_updated_at": "TEXT DEFAULT ''"},
             }
             for table, cols in additions.items():
@@ -450,7 +448,7 @@ class CloudDatabase:
 
     def save_document(self, project_id: int, doc_type: str, data: dict, doc_id: int | None = None) -> int:
         fields = ["code","subject","discipline","contractor","issuer","assignee","issue_date","due_date","closed_date",
-                  "status","priority","related_wbs","description","response","note","cost_impact","time_impact_days"]
+                  "status","priority","related_wbs","description","response","cost_impact","time_impact_days"]
         vals = [data.get(f, "") for f in fields]
         with self.connect() as c:
             if doc_id:

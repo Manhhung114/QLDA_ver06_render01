@@ -628,7 +628,7 @@ def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, recor
     if folder.get("url"):
         st.link_button("📂 Mở thư mục trên Google Drive", folder["url"], width="content")
     if not files:
-        _ui_note("Chưa có file trên Google Drive.")
+        _ui_note("Chưa có file trên Google Drive. Bấm **📎 Đính kèm file**, chọn tệp rồi bấm **⬆ Tải lên** trong khung Google Drive.")
         return
 
     st.markdown("**Danh sách file Google Drive**")
@@ -795,15 +795,15 @@ def render_document_type(pid: int, doc_type: str):
         related_wbs = st.text_input("WBS / Task liên quan", value=(record["related_wbs"] if record else ""))
         description = st.text_area("Mô tả", value=(record["description"] if record else ""))
         response = st.text_area(cfg.get("response_label", "Phản hồi / Kết quả"), value=(record["response"] if record else ""))
-        note = st.text_area("Ghi chú", value=(record["note"] if record and "note" in record.keys() else ""), height=80)
         cost_impact, time_impact = 0.0, 0
 
+        existing_panel_key = f"v6_doc_attach_{pid}_{doc_type}_{selected}" if selected else ""
+        panel_is_open = bool(existing_panel_key and st.session_state.get(existing_panel_key + "_upload_open"))
         b_attach, b_save = st.columns([1, 1])
         with b_attach:
             attach_clicked = st.form_submit_button("📎 Đính kèm file", disabled=not _can_update(), width="stretch")
         with b_save:
-            save_label = "💾 Cập nhật" if selected else "💾 Lưu hồ sơ"
-            save_clicked = st.form_submit_button(save_label, type="primary", disabled=not _can_update(), width="stretch")
+            save_clicked = st.form_submit_button("⬆️ Tải lên", type="primary", disabled=(not _can_update()) or panel_is_open, width="stretch")
 
         if attach_clicked or save_clicked:
             normalized_code = _normalize_execution_code(code)
@@ -818,21 +818,21 @@ def render_document_type(pid: int, doc_type: str):
                         "code": normalized_code, "subject": subject, "discipline": effective_discipline, "contractor": contractor,
                         "issuer": issuer, "assignee": assignee, "issue_date": iso(issue_date), "due_date": iso(due_date),
                         "closed_date": iso(closed_date) if closed_enabled else "", "status": status, "priority": priority,
-                        "related_wbs": related_wbs, "description": description, "response": response, "note": note,
+                        "related_wbs": related_wbs, "description": description, "response": response,
                         "cost_impact": cost_impact, "time_impact_days": time_impact,
                     }, selected)
                     st.session_state[pending_key] = doc_id
-                    if attach_clicked:
-                        panel_key = f"v6_doc_attach_{pid}_{doc_type}_{doc_id}"
-                        try:
-                            _prepare_inline_upload_ticket(
-                                pid, kind="document", subtype=doc_type, record_code=normalized_code, panel_key=panel_key
-                            )
-                            st.session_state[flash_key] = "Đã lưu hồ sơ và mở vùng đính kèm file."
-                        except Exception as exc:
-                            st.session_state[error_flash] = f"Đã lưu hồ sơ nhưng chưa mở được vùng đính kèm file: {exc}"
-                    else:
-                        st.session_state[flash_key] = "Đã lưu/cập nhật hồ sơ."
+                    panel_key = f"v6_doc_attach_{pid}_{doc_type}_{doc_id}"
+                    try:
+                        _prepare_inline_upload_ticket(
+                            pid, kind="document", subtype=doc_type, record_code=normalized_code, panel_key=panel_key
+                        )
+                        if attach_clicked:
+                            st.session_state[flash_key] = "Đã lưu hồ sơ và mở vùng chọn file. Chọn tệp rồi bấm Tải lên trong khung Google Drive."
+                        else:
+                            st.session_state[flash_key] = "Đã lưu/cập nhật hồ sơ và chuẩn bị vùng tải. Chọn tệp rồi bấm Tải lên trong khung Google Drive."
+                    except Exception as exc:
+                        st.session_state[error_flash] = f"Đã lưu hồ sơ nhưng chưa mở được vùng tải file: {exc}"
                     st.rerun()
                 except sqlite3.IntegrityError:
                     st.error(f"Mã {doc_type} đã tồn tại trong dự án.")
@@ -901,7 +901,7 @@ def render_document_type(pid: int, doc_type: str):
             tower = _tower_from_code(code_value)
             discipline_value = str(r["discipline"] or "").strip()
             status_value = str(r["status"] or "").strip()
-            haystack = " ".join([code_value, str(r["subject"] or ""), discipline_value, str(r["contractor"] or ""), str(r["issuer"] or ""), str(r["assignee"] or ""), str(r["note"] or "")]).lower()
+            haystack = " ".join([code_value, str(r["subject"] or ""), discipline_value, str(r["contractor"] or ""), str(r["issuer"] or ""), str(r["assignee"] or "")]).lower()
             if q and q not in haystack:
                 continue
             if filter_tower != "Tất cả" and tower != filter_tower:
@@ -917,7 +917,7 @@ def render_document_type(pid: int, doc_type: str):
                 "Chọn": False, "ID": r["id"], "Tháp": tower, "Mã": code_value, "Nội dung": r["subject"], "Bộ môn": discipline_value,
                 "Nhà thầu": r["contractor"], "Phát hành": r["issue_date"], "Hạn": r["due_date"],
                 "Trạng thái": status_value, "Mức độ": r["priority"], "Theo dõi hạn": document_deadline_label(r, doc_type),
-                "WBS/Task": r["related_wbs"], "Ghi chú": r["note"], "File DB": file_label,
+                "WBS/Task": r["related_wbs"], "File DB": file_label,
             })
             visible_row_ids.append(int(r["id"]))
         if not table_rows:
@@ -1192,14 +1192,15 @@ def render_drawing_type(pid: int, drawing_type: str):
         issue = c2.date_input("Ngày phát hành", value=parse_date(record["issue_date"], date.today()) if record and record["issue_date"] else date.today(), disabled=not issue_enabled)
         related_wbs = st.text_input("WBS / Task / Khu vực liên quan", value=(record["related_wbs"] if record else ""))
         reference = st.text_input("Tham chiếu / Bản vẽ bị thay thế", value=(record["reference_no"] if record else ""))
-        note = st.text_area("Ghi chú", value=(record["note"] if record else ""), height=80)
+        note = record["note"] if record else ""
 
+        existing_panel_key = f"v6_drawing_attach_{pid}_{drawing_type}_{selected}" if selected else ""
+        panel_is_open = bool(existing_panel_key and st.session_state.get(existing_panel_key + "_upload_open"))
         b_attach, b_save = st.columns([1, 1])
         with b_attach:
             attach_clicked = st.form_submit_button("📎 Đính kèm file", disabled=not _can_update(), width="stretch")
         with b_save:
-            save_label = "💾 Cập nhật" if selected else "💾 Lưu bản vẽ"
-            save_clicked = st.form_submit_button(save_label, type="primary", disabled=not _can_update(), width="stretch")
+            save_clicked = st.form_submit_button("⬆️ Tải lên", type="primary", disabled=(not _can_update()) or panel_is_open, width="stretch")
 
         if attach_clicked or save_clicked:
             normalized_number = _normalize_execution_code(number)
@@ -1217,17 +1218,17 @@ def render_drawing_type(pid: int, drawing_type: str):
                         "related_wbs": related_wbs, "reference_no": reference, "note": note,
                     }, selected)
                     st.session_state[pending_key] = drawing_id
-                    if attach_clicked:
-                        panel_key = f"v6_drawing_attach_{pid}_{drawing_type}_{drawing_id}"
-                        try:
-                            _prepare_inline_upload_ticket(
-                                pid, kind="drawing", subtype=drawing_type, record_code=normalized_number, panel_key=panel_key
-                            )
-                            st.session_state[flash_key] = "Đã lưu bản vẽ và mở vùng đính kèm file."
-                        except Exception as exc:
-                            st.session_state[error_flash] = f"Đã lưu bản vẽ nhưng chưa mở được vùng đính kèm file: {exc}"
-                    else:
-                        st.session_state[flash_key] = "Đã lưu/cập nhật bản vẽ."
+                    panel_key = f"v6_drawing_attach_{pid}_{drawing_type}_{drawing_id}"
+                    try:
+                        _prepare_inline_upload_ticket(
+                            pid, kind="drawing", subtype=drawing_type, record_code=normalized_number, panel_key=panel_key
+                        )
+                        if attach_clicked:
+                            st.session_state[flash_key] = "Đã lưu bản vẽ và mở vùng chọn file. Chọn tệp rồi bấm Tải lên trong khung Google Drive."
+                        else:
+                            st.session_state[flash_key] = "Đã lưu/cập nhật bản vẽ và chuẩn bị vùng tải. Chọn tệp rồi bấm Tải lên trong khung Google Drive."
+                    except Exception as exc:
+                        st.session_state[error_flash] = f"Đã lưu bản vẽ nhưng chưa mở được vùng tải file: {exc}"
                     st.rerun()
                 except sqlite3.IntegrityError:
                     st.error("Mã bản vẽ + Revision này đã tồn tại trong cùng nhóm.")
@@ -1296,7 +1297,7 @@ def render_drawing_type(pid: int, drawing_type: str):
             tower = _tower_from_code(code_value)
             discipline_value = str(r["discipline"] or "").strip()
             status_value = str(r["status"] or "").strip()
-            haystack = " ".join([code_value, str(r["title"] or ""), discipline_value, str(r["issuer"] or ""), str(r["receiver"] or ""), str(r["revision"] or ""), str(r["note"] or "")]).lower()
+            haystack = " ".join([code_value, str(r["title"] or ""), discipline_value, str(r["issuer"] or ""), str(r["receiver"] or ""), str(r["revision"] or "")]).lower()
             if q and q not in haystack:
                 continue
             if filter_tower != "Tất cả" and tower != filter_tower:
@@ -1313,7 +1314,7 @@ def render_drawing_type(pid: int, drawing_type: str):
                 "Chọn": False, "ID": r["id"], "Tháp": tower, "Mã bản vẽ": code_value, "Tên bản vẽ": r["title"], "Bộ môn/Hệ": discipline_value,
                 "Revision": r["revision"], "Đơn vị phát hành": r["issuer"], "Người nhận": r["receiver"],
                 "Ngày nhận": r["received_date"], "Ngày phát hành": r["issue_date"], "Trạng thái": status_value,
-                "WBS/Task": r["related_wbs"], "Tham chiếu/Thay thế": r["reference_no"], "Ghi chú": r["note"], "File DB": file_label,
+                "WBS/Task": r["related_wbs"], "Tham chiếu/Thay thế": r["reference_no"], "File DB": file_label,
                 "Cập nhật file gần nhất": latest,
             })
             visible_row_ids.append(int(r["id"]))
@@ -1451,7 +1452,6 @@ def render_site_diary(pid: int):
 
         incident_detail = st.text_area("Mô tả sự cố / Trở ngại", value=str(meta.get("incident_detail") or ""), height=90)
         action_taken = st.text_area("Biện pháp xử lý / Kiến nghị", value=str(meta.get("action_taken") or ""), height=90)
-        note = st.text_area("Ghi chú", value=(record["note"] if record and "note" in record.keys() else ""), height=80)
 
         st.markdown("**Ảnh hiện trường**")
         camera_state_key = f"diary_camera_open_{pid}_{selected or 'new'}"
@@ -1514,7 +1514,6 @@ def render_site_diary(pid: int):
                     "related_wbs": related_wbs,
                     "description": work_done,
                     "response": response_json,
-                    "note": note,
                     "cost_impact": 0,
                     "time_impact_days": 0,
                 }, selected)
@@ -1596,7 +1595,7 @@ def render_site_diary(pid: int):
         weather_v = str(m.get("weather") or "")
         incidents = m.get("incident_types") or []
         has_incident = bool(incidents) or str(m.get("material_status") or "") in {"Thiếu", "Chưa giao"}
-        hay = " ".join([code_value, str(r["subject"] or ""), str(r["description"] or ""), disc, str(r["contractor"] or ""), str(r["issuer"] or ""), str(r["note"] or "")]).lower()
+        hay = " ".join([code_value, str(r["subject"] or ""), str(r["description"] or ""), disc, str(r["contractor"] or ""), str(r["issuer"] or "")]).lower()
         if q and q not in hay: continue
         if filter_tower != "Tất cả" and tower != filter_tower: continue
         if filter_disc != "Tất cả" and disc != filter_disc: continue
@@ -1617,7 +1616,6 @@ def render_site_diary(pid: int):
             "Thời tiết": weather_v,
             "Sự cố": ", ".join(incidents) if incidents else ("Thiếu vật tư" if str(m.get("material_status") or "") in {"Thiếu", "Chưa giao"} else "—"),
             "Vật tư": str(m.get("material_status") or ""),
-            "Ghi chú": r["note"],
             "File DB": f"✅ Có file ({total_files})" if total_files else "—",
         })
         ids.append(int(r["id"]))
