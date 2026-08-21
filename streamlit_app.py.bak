@@ -1454,15 +1454,7 @@ def render_site_diary(pid: int):
         action_taken = st.text_area("Biện pháp xử lý / Kiến nghị", value=str(meta.get("action_taken") or ""), height=90)
 
         st.markdown("**Ảnh hiện trường**")
-        camera_state_key = f"diary_camera_open_{pid}_{selected or 'new'}"
-        camera_is_open = bool(st.session_state.get(camera_state_key, False))
-        if camera_is_open:
-            camera_ctl_clicked = st.form_submit_button("✖ Đóng camera", width="stretch")
-            camera_photo = st.camera_input("📷 Chụp ảnh", key=f"diary_camera_{pid}_{selected or 'new'}")
-        else:
-            camera_ctl_clicked = st.form_submit_button("📷 Mở camera", disabled=not _can_update(), width="stretch")
-            camera_photo = None
-
+        camera_photo = st.camera_input("📷 Chụp ảnh", key=f"diary_camera_{pid}_{selected or 'new'}")
         extra_photos = st.file_uploader(
             "Ảnh từ điện thoại",
             type=["jpg", "jpeg", "png", "webp"],
@@ -1473,13 +1465,6 @@ def render_site_diary(pid: int):
         b1, b2 = st.columns(2)
         save_clicked = b1.form_submit_button("💾 Lưu nhật ký", type="primary", disabled=not _can_update(), width="stretch")
         attach_clicked = b2.form_submit_button("📎 Đính kèm file", disabled=not _can_update(), width="stretch")
-
-    if camera_ctl_clicked:
-        if camera_is_open:
-            st.session_state.pop(camera_state_key, None)
-        else:
-            st.session_state[camera_state_key] = True
-        st.rerun()
 
     if save_clicked or attach_clicked:
         normalized_code = _normalize_execution_code(code)
