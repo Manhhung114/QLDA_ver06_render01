@@ -576,7 +576,7 @@ def _prepare_inline_upload_ticket(pid: int, *, kind: str, subtype: str, record_c
 
 
 def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, record_code: str, record_id: int, panel_key: str) -> None:
-    """V6.0: file nằm ngay dưới nút Cập nhật, không còn file-manager tách riêng.
+    """V6.0: file nằm ngay dưới nút Đính kèm file, không còn nút Cập nhật riêng.
 
     File lớn vẫn đi theo V5 resumable flow: trình duyệt -> Apps Script -> Drive,
     không đi qua Python/SQLite. Quyền update có thể upload/download nhưng không xóa.
@@ -798,14 +798,13 @@ def render_document_type(pid: int, doc_type: str):
         note = st.text_area("Ghi chú", value=(record["note"] if record and "note" in record.keys() else ""), height=80)
         cost_impact, time_impact = 0.0, 0
 
-        b_attach, b_save = st.columns([1, 1])
-        with b_attach:
-            attach_clicked = st.form_submit_button("📎 Đính kèm file", disabled=not _can_update(), width="stretch")
-        with b_save:
-            save_label = "💾 Cập nhật" if selected else "💾 Lưu hồ sơ"
-            save_clicked = st.form_submit_button(save_label, type="primary", disabled=not _can_update(), width="stretch")
+        attach_clicked = st.form_submit_button(
+            "📎 Đính kèm file",
+            disabled=not _can_update(),
+            width="stretch",
+        )
 
-        if attach_clicked or save_clicked:
+        if attach_clicked:
             normalized_code = _normalize_execution_code(code)
             if not normalized_code or not subject.strip():
                 st.error("Mã hồ sơ và nội dung là bắt buộc.")
@@ -822,17 +821,17 @@ def render_document_type(pid: int, doc_type: str):
                         "cost_impact": cost_impact, "time_impact_days": time_impact,
                     }, selected)
                     st.session_state[pending_key] = doc_id
-                    if attach_clicked:
-                        panel_key = f"v6_doc_attach_{pid}_{doc_type}_{doc_id}"
-                        try:
-                            _prepare_inline_upload_ticket(
-                                pid, kind="document", subtype=doc_type, record_code=normalized_code, panel_key=panel_key
-                            )
-                            st.session_state[flash_key] = "Đã lưu hồ sơ và mở vùng đính kèm file."
-                        except Exception as exc:
-                            st.session_state[error_flash] = f"Đã lưu hồ sơ nhưng chưa mở được vùng đính kèm file: {exc}"
-                    else:
-                        st.session_state[flash_key] = "Đã lưu/cập nhật hồ sơ."
+                    panel_key = f"v6_doc_attach_{pid}_{doc_type}_{doc_id}"
+                    try:
+                        # Mỗi lần bấm Đính kèm luôn tạo ticket mới; không tái sử dụng ticket cũ.
+                        st.session_state.pop(panel_key + "_ticket", None)
+                        st.session_state.pop(panel_key + "_upload_open", None)
+                        _prepare_inline_upload_ticket(
+                            pid, kind="document", subtype=doc_type, record_code=normalized_code, panel_key=panel_key
+                        )
+                        st.session_state[flash_key] = "Đã mở vùng đính kèm file."
+                    except Exception as exc:
+                        st.session_state[error_flash] = f"Chưa mở được vùng đính kèm file: {exc}"
                     st.rerun()
                 except sqlite3.IntegrityError:
                     st.error(f"Mã {doc_type} đã tồn tại trong dự án.")
@@ -1194,14 +1193,13 @@ def render_drawing_type(pid: int, drawing_type: str):
         reference = st.text_input("Tham chiếu / Bản vẽ bị thay thế", value=(record["reference_no"] if record else ""))
         note = st.text_area("Ghi chú", value=(record["note"] if record else ""), height=80)
 
-        b_attach, b_save = st.columns([1, 1])
-        with b_attach:
-            attach_clicked = st.form_submit_button("📎 Đính kèm file", disabled=not _can_update(), width="stretch")
-        with b_save:
-            save_label = "💾 Cập nhật" if selected else "💾 Lưu bản vẽ"
-            save_clicked = st.form_submit_button(save_label, type="primary", disabled=not _can_update(), width="stretch")
+        attach_clicked = st.form_submit_button(
+            "📎 Đính kèm file",
+            disabled=not _can_update(),
+            width="stretch",
+        )
 
-        if attach_clicked or save_clicked:
+        if attach_clicked:
             normalized_number = _normalize_execution_code(number)
             if not normalized_number or not title.strip():
                 st.error("Mã bản vẽ và Tên bản vẽ là bắt buộc.")
@@ -1217,17 +1215,17 @@ def render_drawing_type(pid: int, drawing_type: str):
                         "related_wbs": related_wbs, "reference_no": reference, "note": note,
                     }, selected)
                     st.session_state[pending_key] = drawing_id
-                    if attach_clicked:
-                        panel_key = f"v6_drawing_attach_{pid}_{drawing_type}_{drawing_id}"
-                        try:
-                            _prepare_inline_upload_ticket(
-                                pid, kind="drawing", subtype=drawing_type, record_code=normalized_number, panel_key=panel_key
-                            )
-                            st.session_state[flash_key] = "Đã lưu bản vẽ và mở vùng đính kèm file."
-                        except Exception as exc:
-                            st.session_state[error_flash] = f"Đã lưu bản vẽ nhưng chưa mở được vùng đính kèm file: {exc}"
-                    else:
-                        st.session_state[flash_key] = "Đã lưu/cập nhật bản vẽ."
+                    panel_key = f"v6_drawing_attach_{pid}_{drawing_type}_{drawing_id}"
+                    try:
+                        # Mỗi lần bấm Đính kèm luôn tạo ticket mới; không tái sử dụng ticket cũ.
+                        st.session_state.pop(panel_key + "_ticket", None)
+                        st.session_state.pop(panel_key + "_upload_open", None)
+                        _prepare_inline_upload_ticket(
+                            pid, kind="drawing", subtype=drawing_type, record_code=normalized_number, panel_key=panel_key
+                        )
+                        st.session_state[flash_key] = "Đã mở vùng đính kèm file."
+                    except Exception as exc:
+                        st.session_state[error_flash] = f"Chưa mở được vùng đính kèm file: {exc}"
                     st.rerun()
                 except sqlite3.IntegrityError:
                     st.error("Mã bản vẽ + Revision này đã tồn tại trong cùng nhóm.")
