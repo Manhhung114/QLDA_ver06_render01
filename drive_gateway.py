@@ -166,6 +166,7 @@ class DriveGateway:
                 "subtype": subtype,
                 "record_code": record_code,
                 "max_bytes": self.config.direct_max_upload_mb * 1024 * 1024,
+                "webapp_url": self.config.webapp_url,
             },
             session_token=session_token,
         )

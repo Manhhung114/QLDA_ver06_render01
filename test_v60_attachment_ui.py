@@ -6,9 +6,9 @@ ROOT = Path(__file__).resolve().parent
 def test_v60_streamlit_inline_attachment_ui():
     text = (ROOT / "streamlit_app.py").read_text(encoding="utf-8")
     assert "QLDA Xây dựng V6.0" in text
-    assert 'st.form_submit_button("📎 Đính kèm file"' in text
-    assert 'st.form_submit_button("⬆️ Tải lên"' in text
-    assert "components.iframe" in text
+    assert '📎 Đính kèm file' in text
+    # Streamlit chỉ mở vùng đính kèm; nút Tải lên nằm trong Apps Script uploader.
+    assert 'components.iframe' in text
     assert "🗑 Xóa file đã chọn" in text
     assert "⬇️ Tải xuống" in text
     for doc in ["NCR", "RFA", "RFI", "BBHT", "NTCV", "NTVL", "KDVT"]:
@@ -22,5 +22,7 @@ def test_v60_apps_script_embed_and_rbac():
     assert "version: '6.0'" in text
     assert "HtmlService.XFrameOptionsMode.ALLOWALL" in text
     assert "input.addEventListener('change'" in text
+    assert '<button id="start">⬆ Tải lên</button>' in text
+    assert "makeSignedUploadTicket_(meta)" in text
     assert "requireRole_(body, ['admin'])" in text
     assert "MAX_DIRECT_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024" in text
