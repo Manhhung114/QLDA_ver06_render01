@@ -88,6 +88,16 @@ DOC_CONFIG = {
         "assignee_label": "Người / Đơn vị xử lý",
         "response_label": "Kết quả xử lý / Phản hồi",
     },
+    "NKCT": {
+        "title": "Báo cáo nhật ký công trường",
+        "statuses": ["Đã ghi nhận", "Có sự cố", "Đang xử lý", "Đã xử lý"],
+        "done_statuses": ["Đã ghi nhận", "Đã xử lý"],
+        "subject": "Khu vực / Hạng mục",
+        "code_label": "Mã nhật ký *",
+        "issuer_label": "Kỹ sư hiện trường",
+        "assignee_label": "Chỉ huy / Giám sát",
+        "response_label": "Thông tin nhật ký",
+    },
     "NTCV": {
         "title": "Hồ sơ nghiệm thu công việc",
         "statuses": ["Chuẩn bị hồ sơ", "Đã trình nghiệm thu", "Chờ nghiệm thu", "Yêu cầu sửa", "Đạt", "Không đạt", "Đóng"],
@@ -167,6 +177,44 @@ def _file_filter_match(total_files: int, choice: str) -> bool:
     if choice == "Chưa có file":
         return total_files == 0
     return True
+
+
+def _ui_note(*args, **kwargs):
+    """V6 mobile: ẩn các dòng ghi chú/caption để giao diện gọn trên điện thoại."""
+    return None
+
+
+def _drive_preview_url(file_id: str, file_name: str = "", open_url: str = "") -> str:
+    """URL xem nhanh trên trình duyệt, không tải bytes qua Streamlit/Render."""
+    fid = str(file_id or "").strip()
+    name = str(file_name or "").lower()
+    if not fid:
+        return str(open_url or "")
+    ext = Path(name).suffix.lower()
+    # PDF/ảnh dùng Drive preview; CAD/BIM dùng Drive view để trình duyệt/Drive tự xử lý.
+    if ext in {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff"}:
+        return f"https://drive.google.com/file/d/{fid}/preview"
+    if ext in {".dwg", ".dxf", ".dwf", ".rvt", ".ifc", ".nwd", ".nwc"}:
+        return f"https://drive.google.com/file/d/{fid}/view"
+    return str(open_url or f"https://drive.google.com/file/d/{fid}/view")
+
+
+def _diary_meta(record) -> dict:
+    if not record:
+        return {}
+    raw = str(record["response"] or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {"incident_detail": raw}
+
+
+def _diary_json(**kwargs) -> str:
+    payload = {"schema": "qlda_site_diary_v1", **kwargs}
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 st.set_page_config(page_title="QLDA Xây dựng V6.0 • Render • Drive 2GB", page_icon="🏗️", layout="wide")
 
@@ -250,7 +298,7 @@ def project_selector() -> tuple[int | None, list]:
 
 def sidebar_project_tools():
     st.sidebar.markdown("### 🏗️ QLDA Xây dựng V6.0 AI")
-    st.sidebar.caption("Render Web Service" if IS_RENDER else "Streamlit / Local")
+    _ui_note("Render Web Service" if IS_RENDER else "Streamlit / Local")
     with st.sidebar.expander("+ Tạo dự án"):
         with st.form("create_project", clear_on_submit=True):
             code = st.text_input("Mã dự án *")
@@ -275,11 +323,11 @@ def sidebar_project_tools():
 
     with st.sidebar.expander("💾 Sao lưu / khôi phục"):
         if IS_RENDER and str(os.environ.get("QLDA_RENDER_PERSISTENT_DISK", "false")).lower() in {"1", "true", "yes", "on"}:
-            st.caption("Database đang đặt trên Render Persistent Disk. Vẫn nên tải backup định kỳ.")
+            _ui_note("Database đang đặt trên Render Persistent Disk. Vẫn nên tải backup định kỳ.")
         elif IS_RENDER:
             st.warning("Render đang chạy KHÔNG có Persistent Disk: SQLite sẽ mất khi service restart/redeploy. File Google Drive không bị ảnh hưởng.")
         else:
-            st.caption("Hãy tải backup SQLite định kỳ.")
+            _ui_note("Hãy tải backup SQLite định kỳ.")
         backup = db.backup_bytes()
         st.download_button("⬇️ Tải backup SQLite", backup, file_name=f"QLDA_backup_{date.today():%Y%m%d}.db", mime="application/octet-stream", width="stretch")
         restore = st.file_uploader("Khôi phục từ .db", type=["db", "sqlite", "sqlite3"], key="restore_db")
@@ -295,7 +343,7 @@ def sidebar_project_tools():
 def render_schedule(pid: int):
     project = db.project(pid)
     st.subheader("📅 Quản lý tiến độ")
-    st.caption("MPP • WBS • Baseline • Critical Path • Gantt • KH%/TT% • Nhanh/Chậm")
+    _ui_note("MPP • WBS • Baseline • Critical Path • Gantt • KH%/TT% • Nhanh/Chậm")
 
     cdate, csrc = st.columns([1, 3])
     status_date = cdate.date_input("Ngày báo cáo", value=date.today(), key=f"status_date_{pid}")
@@ -346,7 +394,7 @@ def render_schedule(pid: int):
         db.recalc_planned(pid, status_date)
         st.success(f"Đã tính lại KH% tại ngày {status_date:%d/%m/%Y}.")
         st.rerun()
-    a2.caption("KH% tính tuyến tính theo Start–Finish. TT=100% là Hoàn thành; TT<100% sau ngày Kết thúc sẽ tự tính Ngày trễ. TT nhập tay được giữ khi đồng bộ MPP.")
+    _ui_note("KH% tính tuyến tính theo Start–Finish. TT=100% là Hoàn thành; TT<100% sau ngày Kết thúc sẽ tự tính Ngày trễ. TT nhập tay được giữ khi đồng bộ MPP.")
 
     with st.expander("+ Thêm công việc thủ công"):
         with st.form(f"manual_task_{pid}", clear_on_submit=True):
@@ -426,7 +474,7 @@ def render_schedule(pid: int):
         st.rerun()
 
     b1, b2 = st.columns([1, 3])
-    b1.caption("TT % tự lưu khi nhấn Enter hoặc click ra khỏi ô.")
+    _ui_note("TT % tự lưu khi nhấn Enter hoặc click ra khỏi ô.")
     selected_delete = b2.selectbox("Xóa task", [None] + [int(r["id"]) for r in rows], format_func=lambda x: "Chọn..." if x is None else f"#{x}", key=f"delete_task_select_{pid}")
     if st.button("Xóa công việc đã chọn", disabled=(selected_delete is None or not _is_admin()), key=f"delete_task_btn_{pid}"):
         db.delete_task(int(selected_delete))
@@ -547,10 +595,6 @@ def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, recor
     upload = st.session_state.get(panel_key + "_ticket") or {}
     upload_open = bool(st.session_state.get(panel_key + "_upload_open"))
     if upload_open and upload.get("url"):
-        st.info(
-            "Đã mở vùng **Đính kèm file**. Chọn một hoặc nhiều file, sau đó bấm **⬆ Tải lên** màu xanh trong khung để bắt đầu. "
-            "File được tải trực tiếp lên Google Drive, tối đa **2 GB/file**. Khi hoàn tất, bấm **Hoàn tất & cập nhật File DB** bên dưới."
-        )
         # Apps Script V6 sets XFrameOptionsMode.ALLOWALL for this short-lived ticket page.
         components.iframe(upload["url"], height=530, scrolling=True)
         u1, u2 = st.columns([1.4, 1])
@@ -563,7 +607,7 @@ def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, recor
     h1, h2 = st.columns([1, 4])
     if h1.button("🔄 Làm mới file / File DB", key=panel_key + "_refresh_files", width="stretch"):
         st.rerun()
-    h2.caption("⬆ Cập nhật/Admin: đính kèm & tải xuống • 🗑 Chỉ Admin được xóa file đã tick.")
+    _ui_note("⬆ Cập nhật/Admin: đính kèm & tải xuống • 🗑 Chỉ Admin được xóa file đã tick.")
 
     include_history = st.checkbox("Hiện cả _Lich_su", value=False, key=panel_key + "_history")
     try:
@@ -584,15 +628,16 @@ def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, recor
     if folder.get("url"):
         st.link_button("📂 Mở thư mục trên Google Drive", folder["url"], width="content")
     if not files:
-        st.caption("Chưa có file trên Google Drive. Bấm **📎 Đính kèm file**, chọn tệp rồi bấm **⬆ Tải lên** trong khung Google Drive.")
+        _ui_note("Chưa có file trên Google Drive. Bấm **📎 Đính kèm file**, chọn tệp rồi bấm **⬆ Tải lên** trong khung Google Drive.")
         return
 
     st.markdown("**Danh sách file Google Drive**")
-    hd0, hd1, hd2, hd3 = st.columns([0.55, 5.4, 1.1, 1.35])
-    hd0.caption("Xóa")
-    hd1.caption("Tên file")
-    hd2.caption("Mở")
-    hd3.caption("Tải xuống")
+    file_filter = st.text_input("🔎 Lọc file cần xem", key=panel_key + "_inline_file_filter").strip().lower()
+    if file_filter:
+        files = [x for x in files if file_filter in str(x.get("name") or "").lower()]
+    if not files:
+        st.info("Không có file phù hợp bộ lọc.")
+        return
 
     checked_ids: list[tuple[str, str]] = []
     for idx, item in enumerate(files):
@@ -601,7 +646,7 @@ def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, recor
         size = _format_drive_size(item.get("size"))
         modified = str(item.get("modified_time") or "").replace("T", " ").replace("Z", "")[:19]
         history_mark = " 🕘" if item.get("history") else ""
-        c0, c1, c2, c3 = st.columns([0.55, 5.4, 1.1, 1.35])
+        c0, c1, c2, c3, c4 = st.columns([0.52, 4.55, 1.05, 1.05, 1.30])
         marked = c0.checkbox(
             "Chọn xóa",
             key=f"{panel_key}_delete_tick_{idx}_{file_id}",
@@ -610,13 +655,16 @@ def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, recor
             label_visibility="collapsed",
         )
         c1.markdown(f"**{name}**{history_mark}  \n{size}" + (f" • {modified}" if modified else ""))
+        preview_url = _drive_preview_url(file_id, name, str(item.get("url") or ""))
+        if preview_url:
+            c2.link_button("👁 Xem", preview_url, width="stretch")
         if item.get("url"):
-            c2.link_button("☁ Mở", item["url"], width="stretch")
+            c3.link_button("☁ Drive", item["url"], width="stretch")
         download_url = item.get("download_url") or (
             f"https://drive.google.com/uc?export=download&id={file_id}" if file_id else ""
         )
         if download_url:
-            c3.link_button("⬇️ Tải xuống", download_url, width="stretch")
+            c4.link_button("⬇️ Tải", download_url, width="stretch")
         if marked and file_id:
             checked_ids.append((file_id, name))
 
@@ -637,7 +685,7 @@ def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, recor
                 st.error("Không xóa được: " + " | ".join(errors))
             st.rerun()
     else:
-        st.caption("🔒 Quyền Cập nhật/Chỉ đọc không được xóa file. Ô tick xóa chỉ hoạt động với Admin.")
+        _ui_note("🔒 Quyền Cập nhật/Chỉ đọc không được xóa file. Ô tick xóa chỉ hoạt động với Admin.")
 
 
 def _record_drive_counts(pid: int, *, kind: str, subtype: str, record_codes) -> dict[str, dict]:
@@ -656,7 +704,7 @@ def _record_drive_counts(pid: int, *, kind: str, subtype: str, record_codes) -> 
             record_codes=codes,
         )
     except Exception as exc:
-        st.caption(f"⚠ Chưa đồng bộ được trạng thái File DB từ Google Drive: {exc}")
+        _ui_note(f"⚠ Chưa đồng bộ được trạng thái File DB từ Google Drive: {exc}")
         return {}
 
 
@@ -1058,12 +1106,15 @@ def _render_selected_record_downloads(
                 open_url = str(item.get("url") or "") or (
                     f"https://drive.google.com/file/d/{fid}/view" if fid else ""
                 )
-                c1, c2, c3 = st.columns([5.4, 1.2, 1.5])
+                c1, c2, c3, c4 = st.columns([4.8, 1.15, 1.15, 1.35])
                 c1.markdown(f"**{name}**" + (f"  \n{size}" if size else ""))
+                preview_url = _drive_preview_url(fid, name, open_url)
+                if preview_url:
+                    c2.link_button("👁 Xem", preview_url, width="stretch")
                 if open_url:
-                    c2.link_button("☁ Mở", open_url, width="stretch")
+                    c3.link_button("☁ Drive", open_url, width="stretch")
                 if download_url:
-                    c3.link_button("⬇️ Tải xuống", download_url, width="stretch")
+                    c4.link_button("⬇️ Tải", download_url, width="stretch")
 
     if total_files:
         st.success(f"Đã tìm thấy {total_files} file của {len(selected_ids)} {heading} đã chọn.")
@@ -1341,6 +1392,257 @@ def render_drawings(pid: int):
             render_drawing_type(pid, key)
 
 
+def render_site_diary(pid: int):
+    """Nhật ký hiện trường tối ưu cho điện thoại: chụp ảnh, tiến độ và sự cố tại chỗ."""
+    doc_type = "NKCT"
+    rows = db.documents(pid, doc_type)
+    st.subheader("📷 Báo cáo nhật ký công trường")
+
+    options = [None] + [int(r["id"]) for r in rows]
+    select_key = f"diary_select_{pid}"
+    pending_key = select_key + "_pending"
+    pending = st.session_state.pop(pending_key, None)
+    if pending in options:
+        st.session_state[select_key] = pending
+    selected = st.selectbox(
+        "Chọn nhật ký",
+        options,
+        format_func=lambda x: "➕ Nhật ký mới" if x is None else f"#{x} - {next(r['code'] for r in rows if r['id']==x)}",
+        key=select_key,
+    )
+    record = db.document(selected) if selected else None
+    meta = _diary_meta(record)
+
+    with st.form(f"site_diary_form_{pid}_{selected or 'new'}"):
+        c1, c2 = st.columns(2)
+        code = c1.text_input("Mã nhật ký *", value=(record["code"] if record else ""), placeholder="S2-MEP-001")
+        report_date = c2.date_input("Ngày báo cáo", value=parse_date(record["issue_date"], date.today()) if record else date.today())
+
+        c1, c2 = st.columns(2)
+        area = c1.text_input("Khu vực / Hạng mục *", value=(record["subject"] if record else ""))
+        discipline = c2.text_input("Bộ môn / Hệ", value=(record["discipline"] if record else ""))
+
+        c1, c2 = st.columns(2)
+        engineer = c1.text_input("Kỹ sư hiện trường", value=(record["issuer"] if record else _streamlit_user_email()))
+        contractor = c2.text_input("Nhà thầu / Đơn vị", value=(record["contractor"] if record else ""))
+
+        c1, c2 = st.columns(2)
+        progress_value = int(meta.get("progress_percent", 0) or 0)
+        progress_percent = c1.number_input("Tiến độ thực tế (%)", min_value=0, max_value=100, value=max(0, min(100, progress_value)), step=1)
+        weather_options = ["Nắng", "Nhiều mây", "Mưa", "Mưa lớn", "Gió lớn", "Nắng nóng", "Khác"]
+        weather_default = str(meta.get("weather") or "Nắng")
+        weather = c2.selectbox("Thời tiết", weather_options, index=weather_options.index(weather_default) if weather_default in weather_options else 0)
+
+        work_done = st.text_area("Công việc / Khối lượng thực hiện", value=(record["description"] if record else ""), height=110)
+        related_wbs = st.text_input("WBS / Task liên quan", value=(record["related_wbs"] if record else ""))
+
+        incident_options = ["Thiếu vật tư", "Thiếu nhân lực", "Chậm thiết bị", "Thời tiết", "An toàn", "Chất lượng", "Khác"]
+        saved_incidents = meta.get("incident_types") or []
+        if isinstance(saved_incidents, str):
+            saved_incidents = [saved_incidents] if saved_incidents else []
+        incident_types = st.multiselect("Sự cố / Trở ngại", incident_options, default=[x for x in saved_incidents if x in incident_options])
+
+        c1, c2 = st.columns(2)
+        material_options = ["Đủ", "Thiếu", "Chưa giao", "Không áp dụng"]
+        material_saved = str(meta.get("material_status") or "Đủ")
+        material_status = c1.selectbox("Tình trạng vật tư", material_options, index=material_options.index(material_saved) if material_saved in material_options else 0)
+        severity_options = ["Thấp", "Trung bình", "Cao", "Khẩn"]
+        severity_saved = str(record["priority"] if record else "Trung bình")
+        severity = c2.selectbox("Mức độ", severity_options, index=severity_options.index(severity_saved) if severity_saved in severity_options else 1)
+
+        incident_detail = st.text_area("Mô tả sự cố / Trở ngại", value=str(meta.get("incident_detail") or ""), height=90)
+        action_taken = st.text_area("Biện pháp xử lý / Kiến nghị", value=str(meta.get("action_taken") or ""), height=90)
+
+        st.markdown("**Ảnh hiện trường**")
+        camera_photo = st.camera_input("📷 Chụp ảnh", key=f"diary_camera_{pid}_{selected or 'new'}")
+        extra_photos = st.file_uploader(
+            "Ảnh từ điện thoại",
+            type=["jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=True,
+            key=f"diary_photos_{pid}_{selected or 'new'}",
+        )
+
+        b1, b2 = st.columns(2)
+        save_clicked = b1.form_submit_button("💾 Lưu nhật ký", type="primary", disabled=not _can_update(), width="stretch")
+        attach_clicked = b2.form_submit_button("📎 Đính kèm file", disabled=not _can_update(), width="stretch")
+
+    if save_clicked or attach_clicked:
+        normalized_code = _normalize_execution_code(code)
+        if not normalized_code or not area.strip():
+            st.error("Mã nhật ký và Khu vực/Hạng mục là bắt buộc.")
+        elif not _valid_execution_code(normalized_code):
+            st.error("Mã phải theo định dạng THÁP-BỘMÔN-STT, ví dụ S2-MEP-001.")
+        else:
+            try:
+                effective_discipline = discipline.strip() or _discipline_from_code(normalized_code)
+                status = "Có sự cố" if incident_types or material_status in {"Thiếu", "Chưa giao"} else "Đã ghi nhận"
+                response_json = _diary_json(
+                    progress_percent=int(progress_percent),
+                    weather=weather,
+                    incident_types=list(incident_types),
+                    incident_detail=incident_detail,
+                    material_status=material_status,
+                    action_taken=action_taken,
+                )
+                doc_id = db.save_document(pid, doc_type, {
+                    "code": normalized_code,
+                    "subject": area,
+                    "discipline": effective_discipline,
+                    "contractor": contractor,
+                    "issuer": engineer,
+                    "assignee": "",
+                    "issue_date": iso(report_date),
+                    "due_date": "",
+                    "closed_date": "",
+                    "status": status,
+                    "priority": severity,
+                    "related_wbs": related_wbs,
+                    "description": work_done,
+                    "response": response_json,
+                    "cost_impact": 0,
+                    "time_impact_days": 0,
+                }, selected)
+                st.session_state[pending_key] = doc_id
+
+                # Ảnh chụp từ điện thoại thường nhỏ: tải ngay lên cùng thư mục nhật ký trên Drive.
+                photo_items = []
+                if camera_photo is not None:
+                    ext = Path(getattr(camera_photo, "name", "photo.jpg")).suffix or ".jpg"
+                    photo_items.append((f"{normalized_code}_{datetime.now():%Y%m%d_%H%M%S}_camera{ext}", getattr(camera_photo, "type", "image/jpeg"), camera_photo.getvalue()))
+                for f in (extra_photos or []):
+                    photo_items.append((f.name, getattr(f, "type", "image/jpeg") or "image/jpeg", f.getvalue()))
+                if photo_items:
+                    project = db.project(pid)
+                    token = _gateway_session_token()
+                    if project and token:
+                        upload_errors = []
+                        for name, mime, content in photo_items:
+                            try:
+                                _drive_gateway().upload_bytes(
+                                    token,
+                                    project_code=project["code"],
+                                    kind="document",
+                                    subtype=doc_type,
+                                    record_code=normalized_code,
+                                    name=name,
+                                    content=content,
+                                    mime_type=mime,
+                                )
+                            except Exception as exc:
+                                upload_errors.append(f"{name}: {exc}")
+                        if upload_errors:
+                            st.warning("Một số ảnh chưa tải được: " + " | ".join(upload_errors))
+
+                panel_key = f"v6_diary_attach_{pid}_{doc_id}"
+                if attach_clicked:
+                    _prepare_inline_upload_ticket(pid, kind="document", subtype=doc_type, record_code=normalized_code, panel_key=panel_key)
+                st.success("Đã lưu nhật ký công trường.")
+                st.rerun()
+            except sqlite3.IntegrityError:
+                st.error("Mã nhật ký đã tồn tại trong dự án.")
+
+    if selected:
+        current = db.document(selected)
+        if current:
+            _render_inline_drive_attachments(
+                pid,
+                kind="document",
+                subtype=doc_type,
+                record_code=str(current["code"] or ""),
+                record_id=int(selected),
+                panel_key=f"v6_diary_attach_{pid}_{selected}",
+            )
+
+    if not rows:
+        return
+
+    drive_counts = _record_drive_counts(pid, kind="document", subtype=doc_type, record_codes=[r["code"] for r in rows])
+    f1, f2, f3, f4, f5, f6 = st.columns([2.0, .9, 1.1, 1.1, 1.15, 1.0])
+    filter_text = f1.text_input("Tìm nhật ký", key=f"diary_filter_text_{pid}")
+    towers = sorted({_tower_from_code(r["code"]) for r in rows if str(r["code"] or "").strip()})
+    disciplines = sorted({str(r["discipline"] or "").strip() for r in rows if str(r["discipline"] or "").strip()})
+    filter_tower = f2.selectbox("Tháp", ["Tất cả"] + towers, key=f"diary_filter_tower_{pid}")
+    filter_disc = f3.selectbox("Bộ môn", ["Tất cả"] + disciplines, key=f"diary_filter_disc_{pid}")
+    filter_weather = f4.selectbox("Thời tiết", ["Tất cả", "Nắng", "Nhiều mây", "Mưa", "Mưa lớn", "Gió lớn", "Nắng nóng", "Khác"], key=f"diary_filter_weather_{pid}")
+    filter_incident = f5.selectbox("Sự cố", ["Tất cả", "Có sự cố", "Không sự cố"], key=f"diary_filter_incident_{pid}")
+    filter_file = f6.selectbox("Tệp", ["Tất cả", "Có file", "Chưa có file"], key=f"diary_filter_file_{pid}")
+
+    q = filter_text.strip().lower()
+    table_rows = []
+    ids = []
+    for r in rows:
+        m = _diary_meta(r)
+        code_value = str(r["code"] or "")
+        info = drive_counts.get(code_value, {})
+        total_files = int(info.get("count") or 0) + int(r["attachment_count"] or 0)
+        tower = _tower_from_code(code_value)
+        disc = str(r["discipline"] or "")
+        weather_v = str(m.get("weather") or "")
+        incidents = m.get("incident_types") or []
+        has_incident = bool(incidents) or str(m.get("material_status") or "") in {"Thiếu", "Chưa giao"}
+        hay = " ".join([code_value, str(r["subject"] or ""), str(r["description"] or ""), disc, str(r["contractor"] or ""), str(r["issuer"] or "")]).lower()
+        if q and q not in hay: continue
+        if filter_tower != "Tất cả" and tower != filter_tower: continue
+        if filter_disc != "Tất cả" and disc != filter_disc: continue
+        if filter_weather != "Tất cả" and weather_v != filter_weather: continue
+        if filter_incident == "Có sự cố" and not has_incident: continue
+        if filter_incident == "Không sự cố" and has_incident: continue
+        if not _file_filter_match(total_files, filter_file): continue
+        table_rows.append({
+            "Chọn": False,
+            "ID": int(r["id"]),
+            "Ngày": r["issue_date"],
+            "Tháp": tower,
+            "Mã": code_value,
+            "Khu vực/Hạng mục": r["subject"],
+            "Bộ môn": disc,
+            "Kỹ sư": r["issuer"],
+            "Tiến độ %": int(m.get("progress_percent", 0) or 0),
+            "Thời tiết": weather_v,
+            "Sự cố": ", ".join(incidents) if incidents else ("Thiếu vật tư" if str(m.get("material_status") or "") in {"Thiếu", "Chưa giao"} else "—"),
+            "Vật tư": str(m.get("material_status") or ""),
+            "File DB": f"✅ Có file ({total_files})" if total_files else "—",
+        })
+        ids.append(int(r["id"]))
+
+    if not table_rows:
+        st.info("Không có nhật ký phù hợp bộ lọc.")
+        return
+    df = pd.DataFrame(table_rows)
+    edited = st.data_editor(
+        df,
+        hide_index=True,
+        width="stretch",
+        disabled=[c for c in df.columns if c != "Chọn"],
+        column_config={"Chọn": st.column_config.CheckboxColumn("☑ Chọn", default=False)},
+        key=f"diary_grid_{pid}_{len(ids)}_{sum(ids)}_{abs(hash((filter_text, filter_tower, filter_disc, filter_weather, filter_incident, filter_file))) % 100000}",
+    )
+    selected_ids = [int(v) for v in edited.loc[edited["Chọn"] == True, "ID"].tolist()]
+    state_key = f"diary_download_state_{pid}"
+    b1, b2, _ = st.columns([1.4, 1.3, 3.4])
+    if b1.button(f"⬇️ Tải nhật ký đã chọn ({len(selected_ids)})", disabled=not selected_ids, type="primary", width="stretch"):
+        st.session_state[state_key] = list(selected_ids)
+    if b2.button(f"🗑 Xóa nhật ký đã chọn ({len(selected_ids)})", disabled=(not _is_admin()) or not selected_ids, width="stretch"):
+        errors = []
+        deleted = 0
+        for rid in selected_ids:
+            row = db.document(rid)
+            if not row: continue
+            _, drive_errors = _trash_record_drive_files(pid, kind="document", subtype=doc_type, record_code=str(row["code"] or ""))
+            if drive_errors:
+                errors.append(f"#{rid}: " + " | ".join(drive_errors))
+                continue
+            db.delete_document(rid)
+            deleted += 1
+        st.session_state.pop(state_key, None)
+        if deleted: st.success(f"Đã xóa {deleted} nhật ký.")
+        if errors: st.error("Một số nhật ký chưa xóa được: " + " || ".join(errors))
+        st.rerun()
+    download_ids = [int(x) for x in (st.session_state.get(state_key) or [])]
+    if download_ids:
+        _render_selected_document_downloads(pid, doc_type, download_ids, state_key)
+
+
 def render_reports(pid: int):
     st.subheader("📊 Báo cáo trực quan")
     project = db.project(pid)
@@ -1356,7 +1658,7 @@ def render_reports(pid: int):
     doc_summary = []
     doc_total_all = 0
     doc_done_all = 0
-    doc_labels = {"NCR":"NCR", "RFA":"RFA", "RFI":"RFI", "BBHT":"Biên bản hiện trường", "NTCV":"NT công việc", "NTVL":"NT VL đầu vào", "KDVT":"Kiểm định VT"}
+    doc_labels = {"NCR":"NCR", "RFA":"RFA", "RFI":"RFI", "BBHT":"Biên bản hiện trường", "NKCT":"Nhật ký công trường", "NTCV":"NT công việc", "NTVL":"NT VL đầu vào", "KDVT":"Kiểm định VT"}
     for doc_type, cfg in DOC_CONFIG.items():
         rows = db.documents(pid, doc_type)
         total = len(rows)
@@ -1442,7 +1744,7 @@ def render_reports(pid: int):
         else:
             st.dataframe(drawing_df, width="stretch", hide_index=True)
 
-    st.caption("Báo cáo được tính trực tiếp từ dữ liệu dự án hiện tại; khi TT%, hồ sơ hoặc bản vẽ thay đổi, mở lại tab này để xem số liệu mới nhất.")
+    _ui_note("Báo cáo được tính trực tiếp từ dữ liệu dự án hiện tại; khi TT%, hồ sơ hoặc bản vẽ thay đổi, mở lại tab này để xem số liệu mới nhất.")
 
 def _legal_click_url(row) -> str:
     """Luôn trả về URL có thể bấm để xem văn bản; TVPL thiếu link thì fallback sang trang tìm kiếm TVPL."""
@@ -1470,7 +1772,7 @@ def _legal_click_url(row) -> str:
 
 def render_legal_documents():
     st.subheader("📚 Văn bản QLDA Xây dựng")
-    st.caption("Luật • Nghị định • Thông tư • QCVN • TCVN • Quyết định • Dự thảo — TVPL là nguồn tra cứu chính/ưu tiên; luôn giữ link để mở văn bản trực tiếp.")
+    _ui_note("Luật • Nghị định • Thông tư • QCVN • TCVN • Quyết định • Dự thảo — TVPL là nguồn tra cứu chính/ưu tiên; luôn giữ link để mở văn bản trực tiếp.")
 
     last = legal_repo.last_sync()
     if last:
@@ -1510,8 +1812,8 @@ def render_legal_documents():
             st.success("Google Search API đã cấu hình tại ⚙️ Cài đặt/Secrets. App ưu tiên kết quả Google.")
         else:
             st.info("Google API chưa cấu hình. Tìm tự động dùng engine fallback rộng; có thể cấu hình tại sheet ⚙️ Cài đặt.")
-        st.caption("Nguồn chính thức được ưu tiên xếp hạng nhưng KHÔNG giới hạn phạm vi tìm kiếm. Luôn mở nguồn gốc để kiểm tra hiệu lực trước khi áp dụng.")
-        st.caption("Trang chỉ định: " + ", ".join(appcfg.get("specified_search_domains", [])) + ". Có thể sửa danh sách tại sheet ⚙️ Cài đặt.")
+        _ui_note("Nguồn chính thức được ưu tiên xếp hạng nhưng KHÔNG giới hạn phạm vi tìm kiếm. Luôn mở nguồn gốc để kiểm tra hiệu lực trước khi áp dụng.")
+        _ui_note("Trang chỉ định: " + ", ".join(appcfg.get("specified_search_domains", [])) + ". Có thể sửa danh sách tại sheet ⚙️ Cài đặt.")
         q1, q2, qsites, q3 = st.columns([4, 1, 1.2, 1])
         query = q1.text_input("Số hiệu / nội dung cần tìm", placeholder="Ví dụ: Thông tư 06/2021/TT-BXD phân cấp công trình xây dựng; TCVN 5575; QCVN 06", key="legal_web_query")
         if query.strip():
@@ -1634,7 +1936,7 @@ def render_legal_documents():
         file_name=f"Van_ban_QLDA_XD_{date.today():%Y%m%d}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-    st.caption("TVPL là nguồn tra cứu pháp luật chính/ưu tiên trong ứng dụng và mỗi bản ghi có nút Xem văn bản. Khi cần viện dẫn pháp lý, nên kiểm tra bản do cơ quan ban hành công bố.")
+    _ui_note("TVPL là nguồn tra cứu pháp luật chính/ưu tiên trong ứng dụng và mỗi bản ghi có nút Xem văn bản. Khi cần viện dẫn pháp lý, nên kiểm tra bản do cơ quan ban hành công bố.")
 
 
 
@@ -1731,7 +2033,7 @@ def _require_cloud_login_and_access():
     except Exception as exc:
         st.title("🏗️ QLDA Xây dựng V6.0")
         st.error(f"Không kết nối được Google Drive Gateway: {exc}")
-        st.caption("Kiểm tra URL phải là deployment /exec và API token phải trùng với Code.gs.")
+        _ui_note("Kiểm tra URL phải là deployment /exec và API token phải trùng với Code.gs.")
         st.stop()
 
     if not bool(health.get("initialized")):
@@ -1761,7 +2063,7 @@ def _require_cloud_login_and_access():
 
     if not _gateway_session_token():
         st.title("🏗️ QLDA Xây dựng V6.0")
-        st.caption("Google Drive là kho file tập trung. File V6.0 tải trực tiếp theo resumable upload, tối đa 2 GB/file. Không cần Google Cloud Console/OAuth Client/Service Account.")
+        _ui_note("Google Drive là kho file tập trung. File V6.0 tải trực tiếp theo resumable upload, tối đa 2 GB/file. Không cần Google Cloud Console/OAuth Client/Service Account.")
         with st.form("qlda_drive_login"):
             email = st.text_input("Email")
             password = st.text_input("Mật khẩu", type="password")
@@ -1777,7 +2079,7 @@ def _require_cloud_login_and_access():
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
-        st.caption("Tài khoản do Admin QLDA tạo: Chỉ đọc / Cập nhật / Admin. Quyền Cập nhật chỉ được thêm/sửa/upload; không được xóa. Trên Drive, Read/Update chỉ là Viewer; mọi upload đi qua Gateway.")
+        _ui_note("Tài khoản do Admin QLDA tạo: Chỉ đọc / Cập nhật / Admin. Quyền Cập nhật chỉ được thêm/sửa/upload; không được xóa. Trên Drive, Read/Update chỉ là Viewer; mọi upload đi qua Gateway.")
         st.stop()
 
     identity = _cloud_identity(refresh=True)
@@ -1790,9 +2092,9 @@ def _require_cloud_login_and_access():
         st.stop()
 
     with st.sidebar:
-        st.caption(f"Người dùng: {identity.get('name') or identity.get('email')}")
-        st.caption(f"Email: {identity.get('email')}")
-        st.caption("Quyền: " + {"read": "Chỉ đọc", "update": "Cập nhật", "admin": "Admin"}.get(identity.get("role"), ""))
+        _ui_note(f"Người dùng: {identity.get('name') or identity.get('email')}")
+        _ui_note(f"Email: {identity.get('email')}")
+        _ui_note("Quyền: " + {"read": "Chỉ đọc", "update": "Cập nhật", "admin": "Admin"}.get(identity.get("role"), ""))
         if st.button("🚪 Đăng xuất", key="qlda_drive_logout"):
             _gateway_logout()
             st.rerun()
@@ -1848,7 +2150,7 @@ def _render_direct_drive_panel(pid: int, *, kind: str, subtype: str, record_code
     The browser PUTs chunks straight to that Drive session (up to 2 GB/file).
     """
     st.markdown("#### ☁ File trên Google Drive — Direct Upload V6.0")
-    st.caption(
+    _ui_note(
         "Tối đa **2 GB/file**. File không đi qua Streamlit/SQLite và không gửi Base64 qua Apps Script. "
         "File không qua Streamlit/SQLite; Apps Script giữ OAuth và chuyển tiếp chunk thích nghi 2 MB → 1 MB → 512 KiB → 256 KiB vào phiên resumable Google Drive."
     )
@@ -1929,7 +2231,7 @@ def _render_direct_drive_panel(pid: int, *, kind: str, subtype: str, record_code
         st.info("Thư mục Drive hiện chưa có file. Bấm **⬆️ TẢI FILE LÊN GOOGLE DRIVE (2GB)** để tải trực tiếp.")
         return
 
-    st.caption(f"Drive hiện có {len(files)} file" + (" (gồm lịch sử)" if include_history else ""))
+    _ui_note(f"Drive hiện có {len(files)} file" + (" (gồm lịch sử)" if include_history else ""))
     for idx, item in enumerate(files):
         name = str(item.get("name") or "file")
         size = _format_drive_size(item.get("size"))
@@ -1980,7 +2282,7 @@ def _runtime_app_settings() -> dict:
 
 def render_settings():
     st.subheader("⚙️ Cài đặt ứng dụng")
-    st.caption("Tập trung cấu hình AI • Google Search • Google Drive Gateway/RBAC • website tra cứu. Trên Render, secret đặt tại Service → Environment. Khi chạy nơi khác có thể dùng st.secrets.")
+    _ui_note("Tập trung cấu hình AI • Google Search • Google Drive Gateway/RBAC • website tra cứu. Trên Render, secret đặt tại Service → Environment. Khi chạy nơi khác có thể dùng st.secrets.")
     ai_tab, google_tab, drive_tab, sites_tab, system_tab = st.tabs(["🤖 AI", "🔎 Google Search", "☁ Google Drive & quyền", "🌐 Website tra cứu", "🗄 Hệ thống"])
 
     with ai_tab:
@@ -1994,7 +2296,7 @@ def render_settings():
             st.session_state["cfg_openai_model"] = default_model or "gpt-5-mini"
         st.text_input("Model", key="cfg_openai_model")
         st.checkbox("Cho phép Web Search khi AI tra cứu pháp lý", key="cfg_openai_web_search")
-        st.caption("Kiểm tra API sẽ phân biệt key sai, hết quota/credit, rate limit, quyền model và lỗi mạng.")
+        _ui_note("Kiểm tra API sẽ phân biệt key sai, hết quota/credit, rate limit, quyền model và lỗi mạng.")
         if st.button("🩺 Kiểm tra OpenAI API", key="settings_test_openai"):
             cfg_now = _runtime_app_settings()
             try:
@@ -2016,7 +2318,7 @@ def render_settings():
         else:
             st.text_input("Google API key", type="password", key="cfg_google_api_key")
             st.text_input("Search Engine ID (CX)", key="cfg_google_cx")
-        st.caption("Nếu không có Google API, app vẫn dùng Bing/DuckDuckGo fallback và có thể mở Google trực tiếp trên trình duyệt.")
+        _ui_note("Nếu không có Google API, app vẫn dùng Bing/DuckDuckGo fallback và có thể mở Google trực tiếp trên trình duyệt.")
 
     with drive_tab:
         gw = _drive_gateway()
@@ -2031,7 +2333,7 @@ def render_settings():
                 st.write(f"Người dùng: **{ident.get('name') or ident.get('email')}** • Email: **{ident.get('email')}** • Quyền: **{ident.get('label')}**")
                 if root.get("url"):
                     st.link_button("☁ Mở thư mục QLDA Xây dựng", root["url"])
-                st.caption("File V6.0 tải trực tiếp theo resumable upload, tối đa 2 GB/file. Tự phân loại theo Dự án → Hồ sơ/Bản vẽ → Nhóm → Mã hồ sơ; file trùng tên đưa bản cũ vào _Lich_su.")
+                _ui_note("File V6.0 tải trực tiếp theo resumable upload, tối đa 2 GB/file. Tự phân loại theo Dự án → Hồ sơ/Bản vẽ → Nhóm → Mã hồ sơ; file trùng tên đưa bản cũ vào _Lich_su.")
 
                 with st.expander("🔑 Đổi mật khẩu của tôi"):
                     with st.form("drive_change_password"):
@@ -2051,7 +2353,7 @@ def render_settings():
 
                 if ident.get("role") == "admin":
                     st.markdown("### 👥 Phân quyền người dùng")
-                    st.caption("Chỉ đọc = Viewer Drive • Cập nhật = Viewer Drive + được thêm/sửa/upload qua app, KHÔNG được xóa • Admin = Editor Drive + toàn quyền quản trị/xóa trong app. Owner Drive vẫn là tài khoản đã deploy Apps Script.")
+                    _ui_note("Chỉ đọc = Viewer Drive • Cập nhật = Viewer Drive + được thêm/sửa/upload qua app, KHÔNG được xóa • Admin = Editor Drive + toàn quyền quản trị/xóa trong app. Owner Drive vẫn là tài khoản đã deploy Apps Script.")
                     with st.form("drive_user_form"):
                         c1, c2 = st.columns(2)
                         pemail = c1.text_input("Email người dùng")
@@ -2107,7 +2409,7 @@ def render_settings():
             'QLDA_DRIVE_DIRECT_MAX_UPLOAD_MB = "2048"\nQLDA_DRIVE_LEGACY_MAX_UPLOAD_MB = "30"',
             language="toml",
         )
-        st.caption("Không cần GOOGLE_DRIVE_ROOT_FOLDER_ID, Google OAuth Client, Service Account hay Google Cloud Console. Thư mục QLDA Xây dựng tự được tạo bởi Apps Script.")
+        _ui_note("Không cần GOOGLE_DRIVE_ROOT_FOLDER_ID, Google OAuth Client, Service Account hay Google Cloud Console. Thư mục QLDA Xây dựng tự được tạo bởi Apps Script.")
 
     with sites_tab:
         if "cfg_specified_sites" not in st.session_state:
@@ -2117,7 +2419,7 @@ def render_settings():
         def _reset_sites():
             st.session_state["cfg_specified_sites"] = "\n".join(DEFAULT_SPECIFIED_SEARCH_DOMAINS)
         c1.button("Khôi phục mặc định", width="stretch", on_click=_reset_sites)
-        c2.caption("Có thể thêm thuvienphapluat.vn hoặc website tra cứu phù hợp. TVPL được ưu tiên trong sheet Văn bản; link gốc luôn được giữ để mở trực tiếp.")
+        _ui_note("Có thể thêm thuvienphapluat.vn hoặc website tra cứu phù hợp. TVPL được ưu tiên trong sheet Văn bản; link gốc luôn được giữ để mở trực tiếp.")
 
     with system_tab:
         st.code(str(DB_PATH), language=None)
@@ -2128,7 +2430,7 @@ def render_settings():
                 st.success("SQLite đang dùng Render Persistent Disk tại /var/data.")
             else:
                 st.warning("SQLite chưa được xác nhận là persistent. Hãy gắn Render Persistent Disk tại /var/data và đặt QLDA_DB_PATH=/var/data/qlda_cloud.db.")
-        st.caption("Trên Render, nên đặt SQLite tại /var/data/qlda_cloud.db và gắn Persistent Disk vào /var/data. Nếu không có disk, filesystem là tạm thời.")
+        _ui_note("Trên Render, nên đặt SQLite tại /var/data/qlda_cloud.db và gắn Persistent Disk vào /var/data. Nếu không có disk, filesystem là tạm thời.")
         st.info("Cấu hình bền vững trên Render nên dùng Service → Environment. Không commit API key/token vào GitHub.")
 
     cfg = _runtime_app_settings()
@@ -2137,7 +2439,7 @@ def render_settings():
 
 def render_ai_assistant(pid: int):
     st.subheader("🤖 Trợ lý AI QLDA")
-    st.caption("Chat với dự án • Rủi ro tiến độ • Dự thảo báo cáo • Đọc hồ sơ • Tra cứu văn bản. AI chỉ đưa ra đề xuất; người dùng vẫn là người phê duyệt/kết luận.")
+    _ui_note("Chat với dự án • Rủi ro tiến độ • Dự thảo báo cáo • Đọc hồ sơ • Tra cứu văn bản. AI chỉ đưa ra đề xuất; người dùng vẫn là người phê duyệt/kết luận.")
 
     appcfg = _runtime_app_settings()
     settings = AISettings(
@@ -2161,7 +2463,7 @@ def render_ai_assistant(pid: int):
         if c1.button("Xóa chat", key=f"ai_clear_{pid}", width="stretch"):
             st.session_state[hkey] = []
             st.rerun()
-        c2.caption("AI nhận snapshot dự án hiện tại: tiến độ, hồ sơ, bản vẽ và metadata văn bản. Không gửi toàn bộ file đính kèm trừ khi anh yêu cầu ở tab Đọc hồ sơ.")
+        _ui_note("AI nhận snapshot dự án hiện tại: tiến độ, hồ sơ, bản vẽ và metadata văn bản. Không gửi toàn bộ file đính kèm trừ khi anh yêu cầu ở tab Đọc hồ sơ.")
         for msg in st.session_state[hkey]:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
@@ -2237,7 +2539,7 @@ def render_ai_assistant(pid: int):
             st.markdown(file_result)
 
     with tab_legal:
-        st.caption("AI ưu tiên các văn bản đã đồng bộ trong sheet Văn bản QLDA XD. Nếu bật Web Search, AI có thể kiểm tra thêm nguồn online; vẫn cần mở văn bản gốc để xác nhận điều khoản.")
+        _ui_note("AI ưu tiên các văn bản đã đồng bộ trong sheet Văn bản QLDA XD. Nếu bật Web Search, AI có thể kiểm tra thêm nguồn online; vẫn cần mở văn bản gốc để xác nhận điều khoản.")
         lq = st.text_area("Câu hỏi pháp lý/tiêu chuẩn", placeholder="Ví dụ: Các văn bản trong kho liên quan quản lý chất lượng và nghiệm thu vật liệu đầu vào?", key=f"ai_legal_q_{pid}")
         if st.button("Tra cứu văn bản bằng AI", type="primary", disabled=not bool(lq.strip()), key=f"ai_legal_btn_{pid}"):
             try:
@@ -2281,20 +2583,20 @@ _require_cloud_login_and_access()
 sidebar_project_tools()
 pid, projects = project_selector()
 
-st.title("🏗️ QLDA Xây dựng V6.0 • Drive Attach 2GB")
-st.caption("File Hồ sơ/Bản vẽ không đi qua Streamlit; Apps Script chuyển tiếp chunk vào Google Drive resumable upload, tối đa 2 GB/file.")
+st.title("🏗️ QLDA Xây dựng V6.0")
+_ui_note("File Hồ sơ/Bản vẽ không đi qua Streamlit; Apps Script chuyển tiếp chunk vào Google Drive resumable upload, tối đa 2 GB/file.")
 if not pid:
     st.info("Hãy tạo dự án đầu tiên ở thanh bên trái.")
     st.stop()
 
 p = db.project(pid)
-st.caption(f"Dự án: **{p['code']} - {p['name']}**")
+_ui_note(f"Dự án: **{p['code']} - {p['name']}**")
 _role = _cloud_access_role()
 _email = _streamlit_user_email()
 _role_label = {"read":"Chỉ đọc","update":"Cập nhật","admin":"Admin","unknown":"Chưa xác định"}.get(_role, _role)
 st.info(f"Quyền hiện tại: **{_role_label}**" + (f" • {_email}" if _email else ""))
 
-main_tabs = st.tabs(["📅 Quản lý tiến độ", "📁 Quản lý hồ sơ", "📐 Quản lý bản vẽ", "📊 Báo cáo trực quan", "📚 Văn bản QLDA XD", "🤖 Trợ lý AI", "⚙️ Cài đặt", "🏗️ Dự án"])
+main_tabs = st.tabs(["📅 Quản lý tiến độ", "📁 Quản lý hồ sơ", "📐 Quản lý bản vẽ", "📷 Nhật ký công trường", "📊 Báo cáo trực quan", "📚 Văn bản QLDA XD", "🤖 Trợ lý AI", "⚙️ Cài đặt", "🏗️ Dự án"])
 with main_tabs[0]:
     render_schedule(pid)
 with main_tabs[1]:
@@ -2302,12 +2604,14 @@ with main_tabs[1]:
 with main_tabs[2]:
     render_drawings(pid)
 with main_tabs[3]:
-    render_reports(pid)
+    render_site_diary(pid)
 with main_tabs[4]:
-    render_legal_documents()
+    render_reports(pid)
 with main_tabs[5]:
-    render_ai_assistant(pid)
+    render_legal_documents()
 with main_tabs[6]:
-    render_settings()
+    render_ai_assistant(pid)
 with main_tabs[7]:
+    render_settings()
+with main_tabs[8]:
     render_project_info(pid)
