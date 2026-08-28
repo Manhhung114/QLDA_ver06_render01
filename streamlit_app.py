@@ -31,7 +31,12 @@ APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 IS_RENDER = str(os.environ.get("RENDER", "")).strip().lower() == "true"
-DEPLOY_PLATFORM = "Render" if IS_RENDER else "Streamlit/Local"
+IS_RAILWAY = bool(
+    str(os.environ.get("RAILWAY_ENVIRONMENT", "")).strip()
+    or str(os.environ.get("RAILWAY_SERVICE_ID", "")).strip()
+    or str(os.environ.get("RAILWAY_PROJECT_ID", "")).strip()
+)
+DEPLOY_PLATFORM = "Railway" if IS_RAILWAY else ("Render" if IS_RENDER else "Streamlit/Local")
 DEFAULT_DB_PATH = Path("/var/data/qlda_cloud.db") if IS_RENDER else (DATA_DIR / "qlda_cloud.db")
 DB_PATH = Path(os.environ.get("QLDA_DB_PATH", str(DEFAULT_DB_PATH)))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -2466,19 +2471,42 @@ def _render_direct_drive_panel(pid: int, *, kind: str, subtype: str, record_code
                 st.error(str(exc))
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = _streamlit_secret(name, "") or os.environ.get(name, "")
+    if str(raw or "").strip() == "":
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ai_server_config_location() -> str:
+    if IS_RAILWAY:
+        return "Railway → Service → Variables"
+    if IS_RENDER:
+        return "Render → Service → Environment"
+    return "biến môi trường máy chủ hoặc .streamlit/secrets.toml"
+
+
 def _runtime_app_settings() -> dict:
-    """Runtime settings for one Streamlit session. Secrets/env take precedence over manual session values."""
+    """Runtime settings shared by every device.
+
+    AI API keys and AI runtime options are intentionally server-owned. They are
+    NEVER read from st.session_state, so a PC, phone and tablet logged into the
+    same deployment all use exactly the same server configuration.
+    """
     google_key = (_streamlit_secret("GOOGLE_SEARCH_API_KEY", "") or os.environ.get("GOOGLE_SEARCH_API_KEY", "") or st.session_state.get("cfg_google_api_key", "")).strip()
     google_cx = (_streamlit_secret("GOOGLE_SEARCH_CX", "") or os.environ.get("GOOGLE_SEARCH_CX", "") or st.session_state.get("cfg_google_cx", "")).strip()
-    provider_default = (_streamlit_secret("AI_PROVIDER", "") or os.environ.get("AI_PROVIDER", "") or st.session_state.get("cfg_ai_provider", "openai") or "openai").strip().lower()
+
+    provider_default = (_streamlit_secret("AI_PROVIDER", "") or os.environ.get("AI_PROVIDER", "") or "openai").strip().lower()
     provider = "gemini" if provider_default == "gemini" else "openai"
-    openai_key = (_streamlit_secret("OPENAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "") or st.session_state.get("cfg_openai_api_key", "")).strip()
-    openai_model = (_streamlit_secret("OPENAI_MODEL", "") or os.environ.get("OPENAI_MODEL", "") or st.session_state.get("cfg_openai_model", "gpt-5-mini") or "gpt-5-mini").strip()
-    gemini_key = (_streamlit_secret("GEMINI_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "") or st.session_state.get("cfg_gemini_api_key", "")).strip()
-    gemini_model = (_streamlit_secret("GEMINI_MODEL", "") or os.environ.get("GEMINI_MODEL", "") or st.session_state.get("cfg_gemini_model", "auto") or "auto").strip()
-    if "cfg_ai_web_search" not in st.session_state:
-        env_web = _streamlit_secret("AI_WEB_SEARCH", "") or os.environ.get("AI_WEB_SEARCH", "") or os.environ.get("OPENAI_WEB_SEARCH", "") or os.environ.get("GEMINI_WEB_SEARCH", "")
-        st.session_state["cfg_ai_web_search"] = str(env_web or "0").strip().lower() in {"1", "true", "yes", "on"}
+    openai_key = (_streamlit_secret("OPENAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")).strip()
+    openai_model = (_streamlit_secret("OPENAI_MODEL", "") or os.environ.get("OPENAI_MODEL", "") or "gpt-5-mini").strip()
+    gemini_key = (_streamlit_secret("GEMINI_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")).strip()
+    gemini_model = (_streamlit_secret("GEMINI_MODEL", "") or os.environ.get("GEMINI_MODEL", "") or "auto").strip()
+    ai_web_search = _env_bool("AI_WEB_SEARCH", False)
+    if not (_streamlit_secret("AI_WEB_SEARCH", "") or os.environ.get("AI_WEB_SEARCH", "")):
+        # Backward-compatible environment names.
+        ai_web_search = _env_bool("GEMINI_WEB_SEARCH", _env_bool("OPENAI_WEB_SEARCH", False))
+
     if "cfg_specified_sites" not in st.session_state:
         st.session_state["cfg_specified_sites"] = "\n".join(DEFAULT_SPECIFIED_SEARCH_DOMAINS)
     domains = []
@@ -2491,9 +2519,9 @@ def _runtime_app_settings() -> dict:
     return {
         "google_api_key": google_key, "google_cx": google_cx,
         "ai_provider": provider,
-        "ai_web_search": bool(st.session_state.get("cfg_ai_web_search", False)),
+        "ai_web_search": bool(ai_web_search),
         "openai_api_key": openai_key, "openai_model": openai_model or "gpt-5-mini",
-        "openai_web_search": bool(st.session_state.get("cfg_ai_web_search", False)),
+        "openai_web_search": bool(ai_web_search),
         "gemini_api_key": gemini_key, "gemini_model": gemini_model or "auto",
         "specified_search_domains": domains or list(DEFAULT_SPECIFIED_SEARCH_DOMAINS),
     }
@@ -2501,65 +2529,61 @@ def _runtime_app_settings() -> dict:
 
 def render_settings():
     st.subheader("⚙️ Cài đặt ứng dụng")
-    _ui_note("Tập trung cấu hình AI • Google Search • Google Drive Gateway/RBAC • website tra cứu. Trên Render, secret đặt tại Service → Environment. Khi chạy nơi khác có thể dùng st.secrets.")
+    _ui_note(f"Cấu hình hệ thống • AI dùng cấu hình tập trung tại {_ai_server_config_location()}; API key không lưu trên trình duyệt.")
     ai_tab, google_tab, drive_tab, sites_tab, system_tab = st.tabs(["🤖 AI", "🔎 Google Search", "☁ Google Drive & quyền", "🌐 Website tra cứu", "🗄 Hệ thống"])
 
     with ai_tab:
-        provider_env = (_streamlit_secret("AI_PROVIDER", "") or os.environ.get("AI_PROVIDER", "")).strip().lower()
-        if "cfg_ai_provider" not in st.session_state:
-            st.session_state["cfg_ai_provider"] = "gemini" if provider_env == "gemini" else "openai"
-        provider_label = st.selectbox(
-            "Nhà cung cấp AI",
-            ["OpenAI", "Gemini"],
-            index=1 if st.session_state.get("cfg_ai_provider") == "gemini" else 0,
-            key="cfg_ai_provider_select",
-        )
-        st.session_state["cfg_ai_provider"] = "gemini" if provider_label == "Gemini" else "openai"
-        active_provider = st.session_state["cfg_ai_provider"]
+        cfg_ai = _runtime_app_settings()
+        provider = cfg_ai.get("ai_provider", "openai")
+        provider_name = "Gemini" if provider == "gemini" else "OpenAI"
+        active_key = cfg_ai.get("gemini_api_key") if provider == "gemini" else cfg_ai.get("openai_api_key")
+        active_model = cfg_ai.get("gemini_model") if provider == "gemini" else cfg_ai.get("openai_model")
 
-        if active_provider == "openai":
-            secret_ai = bool(_streamlit_secret("OPENAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", ""))
-            if secret_ai:
-                st.success("OPENAI_API_KEY đã được cấu hình bằng Secrets/biến môi trường.")
-            else:
-                st.text_input("OpenAI API key", type="password", key="cfg_openai_api_key")
-            default_model = _streamlit_secret("OPENAI_MODEL", "") or os.environ.get("OPENAI_MODEL", "") or st.session_state.get("cfg_openai_model", "gpt-5-mini")
-            if "cfg_openai_model" not in st.session_state:
-                st.session_state["cfg_openai_model"] = default_model or "gpt-5-mini"
-            st.text_input("OpenAI model", key="cfg_openai_model")
+        st.write(f"**Nhà cung cấp AI toàn hệ thống:** {provider_name}")
+        st.write(f"**Model:** {active_model}")
+        st.write(f"**Web Search:** {'Bật' if cfg_ai.get('ai_web_search') else 'Tắt'}")
+        if active_key:
+            st.success(f"{provider_name} API key đã cấu hình trên máy chủ. Mọi máy tính/điện thoại dùng chung cấu hình này.")
         else:
-            secret_gemini = bool(_streamlit_secret("GEMINI_API_KEY", "") or os.environ.get("GEMINI_API_KEY", ""))
-            if secret_gemini:
-                st.success("GEMINI_API_KEY đã được cấu hình bằng Secrets/biến môi trường.")
-            else:
-                st.text_input("Gemini API key", type="password", key="cfg_gemini_api_key")
-            default_gemini_model = _streamlit_secret("GEMINI_MODEL", "") or os.environ.get("GEMINI_MODEL", "") or st.session_state.get("cfg_gemini_model", "auto")
-            if "cfg_gemini_model" not in st.session_state:
-                st.session_state["cfg_gemini_model"] = default_gemini_model or "auto"
-            st.text_input("Gemini model (khuyên dùng: auto)", key="cfg_gemini_model")
+            st.error(f"Chưa cấu hình API key cho {provider_name} trên máy chủ.")
 
-        st.checkbox("Cho phép tìm kiếm web khi AI tra cứu pháp lý", key="cfg_ai_web_search")
-        test_label = "🩺 Kiểm tra Gemini API" if active_provider == "gemini" else "🩺 Kiểm tra OpenAI API"
-        if st.button(test_label, key="settings_test_ai_provider"):
-            cfg_now = _runtime_app_settings()
-            try:
-                if cfg_now.get("ai_provider") == "gemini":
-                    test_ai = GeminiProjectAssistant(DB_PATH, GeminiSettings(
-                        api_key=(cfg_now.get("gemini_api_key") or "").strip(),
-                        model=(cfg_now.get("gemini_model") or "auto").strip(),
-                        use_web=False,
-                    ))
-                else:
-                    test_ai = OpenAIProjectAssistant(DB_PATH, AISettings(
-                        api_key=(cfg_now.get("openai_api_key") or "").strip(),
-                        model=(cfg_now.get("openai_model") or "gpt-5-mini").strip(),
-                        use_web=False,
-                    ))
-                with st.spinner("Đang kiểm tra API key, quota và quyền model..."):
-                    msg = test_ai.test_connection()
-                st.success(msg)
-            except Exception as exc:
-                st.error(str(exc))
+        if _is_admin():
+            st.info(
+                "API key không được nhập hoặc hiển thị trong ứng dụng. "
+                f"Admin thay đổi tại **{_ai_server_config_location()}** rồi redeploy/restart service."
+            )
+            st.code(
+                "AI_PROVIDER=gemini\n"
+                "GEMINI_API_KEY=...\n"
+                "GEMINI_MODEL=auto\n"
+                "AI_WEB_SEARCH=true\n\n"
+                "# Có thể cấu hình OpenAI song song\n"
+                "OPENAI_API_KEY=...\n"
+                "OPENAI_MODEL=gpt-5-mini",
+                language="bash",
+            )
+            test_label = f"🩺 Kiểm tra {provider_name} API"
+            if st.button(test_label, key="settings_test_ai_provider"):
+                try:
+                    if provider == "gemini":
+                        test_ai = GeminiProjectAssistant(DB_PATH, GeminiSettings(
+                            api_key=(cfg_ai.get("gemini_api_key") or "").strip(),
+                            model=(cfg_ai.get("gemini_model") or "auto").strip(),
+                            use_web=False,
+                        ))
+                    else:
+                        test_ai = OpenAIProjectAssistant(DB_PATH, AISettings(
+                            api_key=(cfg_ai.get("openai_api_key") or "").strip(),
+                            model=(cfg_ai.get("openai_model") or "gpt-5-mini").strip(),
+                            use_web=False,
+                        ))
+                    with st.spinner("Đang kiểm tra API key, quota và quyền model..."):
+                        msg = test_ai.test_connection()
+                    st.success(msg)
+                except Exception as exc:
+                    st.error(str(exc))
+        else:
+            st.info("Cấu hình AI do Admin quản lý tập trung trên máy chủ; người dùng không cần nhập API key trên từng thiết bị.")
 
     with google_tab:
         secret_google = bool((_streamlit_secret("GOOGLE_SEARCH_API_KEY", "") or os.environ.get("GOOGLE_SEARCH_API_KEY", "")) and (_streamlit_secret("GOOGLE_SEARCH_CX", "") or os.environ.get("GOOGLE_SEARCH_CX", "")))
@@ -2673,7 +2697,9 @@ def render_settings():
 
     with system_tab:
         st.code(str(DB_PATH), language=None)
-        if IS_RENDER:
+        if IS_RAILWAY:
+            st.success(f"Đang chạy trên Railway • service: {os.environ.get('RAILWAY_SERVICE_NAME', 'QLDA V6.0')}")
+        elif IS_RENDER:
             st.success(f"Đang chạy trên Render • service: {os.environ.get('RENDER_SERVICE_NAME', 'QLDA V6.0')}")
             persistent = str(os.environ.get("QLDA_RENDER_PERSISTENT_DISK", "false")).lower() in {"1", "true", "yes", "on"}
             if persistent and str(DB_PATH).startswith("/var/data/"):
@@ -2713,9 +2739,12 @@ def render_ai_assistant(pid: int):
         provider_name = "OpenAI"
         missing_key = "OPENAI_API_KEY"
     if settings.api_key:
-        st.success(f"AI: {provider_name} • Model: {settings.model} • Web Search: {'Bật' if settings.use_web else 'Tắt'} • chỉnh tại ⚙️ Cài đặt")
+        st.success(f"AI: {provider_name} • Model: {settings.model} • Web Search: {'Bật' if settings.use_web else 'Tắt'} • cấu hình tập trung trên máy chủ")
     else:
-        st.warning(f"Chưa có {missing_key}. Vào sheet ⚙️ Cài đặt để cấu hình.")
+        if _is_admin():
+            st.warning(f"Chưa có {missing_key}. Hãy cấu hình tại {_ai_server_config_location()} rồi redeploy/restart service.")
+        else:
+            st.warning(f"AI chưa được Admin cấu hình trên máy chủ ({missing_key}).")
     ctx_builder = ProjectContextBuilder(DB_PATH)
     tab_chat, tab_risk, tab_file, tab_legal = st.tabs(["💬 Chat với dự án", "📈 Rủi ro & báo cáo", "📎 Đọc hồ sơ", "⚖️ Văn bản AI"])
 

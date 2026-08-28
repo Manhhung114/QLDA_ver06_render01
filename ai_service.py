@@ -111,7 +111,7 @@ def classify_openai_error(exc) -> AIErrorInfo:
         return AIErrorInfo(
             "invalid_api_key", "❌ API key không hợp lệ hoặc đã bị thu hồi",
             "Không thể xác thực với OpenAI API.",
-            "Vào ⚙ Cài đặt → AI, nhập lại API key của OpenAI Platform. Kiểm tra không có khoảng trắng thừa và key chưa bị revoke.",
+            "Kiểm tra OPENAI_API_KEY trong biến môi trường máy chủ (Railway/Render/Streamlit Secrets). Đảm bảo key không có khoảng trắng thừa và chưa bị revoke.",
             False, status or 401,
         )
 
@@ -127,7 +127,7 @@ def classify_openai_error(exc) -> AIErrorInfo:
         return AIErrorInfo(
             "permission_denied", "🔒 API key không có quyền thực hiện yêu cầu",
             "Project/API key hiện không có quyền dùng model hoặc tính năng đang gọi.",
-            "Kiểm tra quyền của API key/Project và model tại ⚙ Cài đặt → AI. Nếu Web Search đang bật, thử tắt Web Search để kiểm tra riêng kết nối model.",
+            "Kiểm tra quyền của API key/Project và OPENAI_MODEL trong biến môi trường máy chủ. Nếu AI_WEB_SEARCH đang bật, thử tắt để kiểm tra riêng kết nối model.",
             False, status or 403,
         )
 
@@ -135,7 +135,7 @@ def classify_openai_error(exc) -> AIErrorInfo:
         return AIErrorInfo(
             "model_not_found", "🧩 Model không tồn tại hoặc Project chưa được cấp quyền",
             f"Model đang cấu hình không dùng được cho API request này.",
-            "Vào ⚙ Cài đặt → AI và chọn một model mà Project API của anh có quyền sử dụng, sau đó bấm Kiểm tra AI lại.",
+            "Đổi OPENAI_MODEL tại biến môi trường máy chủ sang model mà Project API được phép sử dụng, sau đó redeploy/restart và kiểm tra lại.",
             False, status or 404,
         )
 
@@ -186,7 +186,7 @@ def classify_openai_error(exc) -> AIErrorInfo:
     return AIErrorInfo(
         "unknown", "⚠️ Không gọi được OpenAI API",
         detail,
-        "Bấm Kiểm tra AI lại. Nếu vẫn lỗi, kiểm tra ⚙ Cài đặt → AI, Internet và Billing/Usage của OpenAI Platform.",
+        "Bấm Kiểm tra AI lại. Nếu vẫn lỗi, kiểm tra biến môi trường máy chủ, Internet và Billing/Usage của OpenAI Platform.",
         False, status,
     )
 
@@ -600,7 +600,7 @@ class OpenAIProjectAssistant:
     def _client(self):
         key = (self.settings.api_key or os.environ.get("OPENAI_API_KEY", "")).strip()
         if not key:
-            raise AIServiceError("Chưa có OPENAI_API_KEY. Hãy cấu hình tại sheet Cài đặt hoặc dùng Secrets/biến môi trường.")
+            raise AIServiceError("Chưa có OPENAI_API_KEY trên máy chủ. Hãy cấu hình trong Railway/Render Environment Variables hoặc Streamlit Secrets.")
         try:
             from openai import OpenAI
         except Exception as exc:
@@ -749,7 +749,7 @@ class GeminiProjectAssistant(OpenAIProjectAssistant):
     def _client(self):
         key = (self.settings.api_key or os.environ.get("GEMINI_API_KEY", "")).strip()
         if not key:
-            raise AIServiceError("Chưa có GEMINI_API_KEY. Hãy cấu hình tại sheet Cài đặt hoặc dùng Secrets/biến môi trường.")
+            raise AIServiceError("Chưa có GEMINI_API_KEY trên máy chủ. Hãy cấu hình trong Railway/Render Environment Variables hoặc Streamlit Secrets.")
         try:
             from google import genai
         except Exception as exc:
