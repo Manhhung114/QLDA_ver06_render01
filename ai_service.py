@@ -6,6 +6,8 @@ import os
 import re
 import sqlite3
 import tempfile
+import time
+import random
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -282,9 +284,9 @@ def classify_gemini_error(exc) -> AIErrorInfo:
         )
     if status is not None and status >= 500:
         return AIErrorInfo(
-            "server_error", "🛠️ Gemini API đang gặp lỗi tạm thời",
-            "Google Gemini trả lỗi máy chủ.",
-            "Chờ một lúc rồi thử lại.",
+            "server_error", "🛠️ Gemini API đang quá tải hoặc gặp lỗi tạm thời",
+            "Google Gemini trả lỗi máy chủ sau khi ứng dụng đã tự retry và thử model dự phòng.",
+            "Thử lại sau ít phút. Nếu lỗi 503 xảy ra thường xuyên, đặt GEMINI_MODEL=auto và giữ GEMINI_MAX_FALLBACK_MODELS từ 3-4.",
             True, status,
         )
     return AIErrorInfo(
@@ -803,20 +805,101 @@ class GeminiProjectAssistant(OpenAIProjectAssistant):
     def _is_model_not_found(exc: Exception) -> bool:
         return classify_gemini_error(exc).code == "model_not_found"
 
-    def _generate_content_with_fallback(self, client, *, contents, config):
-        first_model = self._resolve_model(client)
+    @staticmethod
+    def _is_transient_gemini_error(exc: Exception) -> bool:
+        info = classify_gemini_error(exc)
+        # 500/503/504 và 429 thường là lỗi tạm thời / quá tải / rate limit.
+        return info.code in {"server_error", "rate_limit", "timeout", "network"}
+
+    def _fallback_model_sequence(self, client, *, refresh: bool = False) -> list[str]:
+        configured = self._normalize_model_name(
+            (self.settings.model or os.environ.get("GEMINI_MODEL", "auto")).strip() or "auto"
+        )
         try:
-            return client.models.generate_content(model=first_model, contents=contents, config=config)
-        except Exception as exc:
-            if not self._is_model_not_found(exc):
-                raise
-            # Model cấu hình không dùng được với API key hiện tại: lấy lại danh sách model
-            # từ chính API key và thử một model generateContent khác đúng một lần.
-            self._resolved_model = None
-            second_model = self._resolve_model(client, refresh=True, exclude={first_model})
-            if not second_model or second_model == first_model:
-                raise
-            return client.models.generate_content(model=second_model, contents=contents, config=config)
+            available = self._available_generate_models(client, refresh=refresh)
+        except Exception:
+            available = []
+
+        result: list[str] = []
+        if configured.lower() not in {"", "auto", "default"}:
+            if not available or configured in available:
+                result.append(configured)
+        for candidate in self._preferred_model_candidates():
+            if (not available or candidate in available) and candidate not in result:
+                result.append(candidate)
+        for candidate in available:
+            low = candidate.lower()
+            if candidate in result:
+                continue
+            if "gemini" in low and not any(x in low for x in ["image", "live", "tts", "embed", "embedding", "transcribe"]):
+                result.append(candidate)
+        if not result:
+            result.append(configured if configured.lower() not in {"", "auto", "default"} else "gemini-2.5-flash")
+        return result
+
+    def _generate_content_with_fallback(self, client, *, contents, config):
+        """Gọi Gemini theo chiến lược chịu lỗi production.
+
+        - 404 model_not_found: chuyển model ngay.
+        - 429/500/503/504/network/timeout: retry exponential backoff + jitter.
+        - Nếu một model vẫn quá tải sau các lần retry, tự chuyển sang model Gemini khác
+          mà chính API key hiện tại có quyền generateContent.
+        """
+        try:
+            retry_attempts = max(1, min(5, int(os.environ.get("GEMINI_RETRY_ATTEMPTS", "3"))))
+        except Exception:
+            retry_attempts = 3
+        try:
+            base_delay = max(0.25, min(5.0, float(os.environ.get("GEMINI_RETRY_BASE_SECONDS", "0.8"))))
+        except Exception:
+            base_delay = 0.8
+        try:
+            max_models = max(1, min(6, int(os.environ.get("GEMINI_MAX_FALLBACK_MODELS", "4"))))
+        except Exception:
+            max_models = 4
+
+        models = self._fallback_model_sequence(client)[:max_models]
+        last_exc: Exception | None = None
+
+        for model_index, model in enumerate(models):
+            self._resolved_model = model
+            for attempt in range(retry_attempts):
+                try:
+                    return client.models.generate_content(model=model, contents=contents, config=config)
+                except Exception as exc:
+                    last_exc = exc
+                    info = classify_gemini_error(exc)
+
+                    # Model không tồn tại/không được route cho key này: bỏ qua model hiện tại.
+                    if info.code == "model_not_found":
+                        break
+
+                    # Lỗi không tạm thời thì không retry/fallback mù quáng.
+                    if not self._is_transient_gemini_error(exc):
+                        raise
+
+                    # Retry cùng model nếu còn lượt.
+                    if attempt < retry_attempts - 1:
+                        delay = base_delay * (2 ** attempt) + random.uniform(0, base_delay * 0.35)
+                        time.sleep(delay)
+                        continue
+                    # Hết retry với model này: chuyển model kế tiếp.
+                    break
+
+            # Sau model đầu tiên lỗi, refresh model list một lần để tránh alias/routing cũ.
+            if model_index == 0 and last_exc is not None:
+                try:
+                    refreshed = self._fallback_model_sequence(client, refresh=True)
+                    for candidate in refreshed:
+                        if candidate not in models:
+                            models.append(candidate)
+                    models = models[:max_models]
+                except Exception:
+                    pass
+
+        if last_exc is not None:
+            raise last_exc
+        raise AIServiceError("Gemini không có model generateContent khả dụng cho API key hiện tại.", code="model_not_found")
 
     @staticmethod
     def _content_text(content) -> str:
