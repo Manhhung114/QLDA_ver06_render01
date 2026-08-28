@@ -4,14 +4,15 @@ APP = Path(__file__).with_name('streamlit_app.py').read_text(encoding='utf-8')
 
 
 def test_rfa_rfi_contractor_has_submission_upload():
-    assert '📎 Lưu & tải tệp trình duyệt' in APP
-    assert '📎 Tải tệp trình duyệt lên' in APP
-    assert 'submission_upload_after_save_document_' in APP
+    assert '📎 Đính kèm file' in APP
+    assert 'approval_doc_attach_before_save_' in APP
+    assert 'v66_doc_attach_' in APP
 
 
 def test_shopdrawing_contractor_has_submission_upload():
-    assert '📎 Tải tệp Shopdrawing trình duyệt lên' in APP
-    assert 'submission_upload_after_save_drawing_' in APP
+    assert '📎 Đính kèm file Shopdrawing' in APP
+    assert 'approval_sd_attach_before_save_' in APP
+    assert 'v66_drawing_attach_' in APP
 
 
 def test_reviewer_sees_files_before_approval_and_approval_requires_file():
