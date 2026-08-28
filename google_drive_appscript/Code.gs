@@ -35,7 +35,7 @@ function doGet(e) {
   return jsonResponse_({
     ok: true,
     service: 'QLDA Drive Gateway',
-    version: '6.2',
+    version: '6.7',
     direct_upload: true,
     max_file_bytes: MAX_DIRECT_UPLOAD_BYTES,
     message: 'Use POST JSON requests or open an upload ticket URL.'
@@ -55,6 +55,7 @@ function doPost(e) {
       case 'me': result = me_(body); break;
       case 'root_info': result = rootInfo_(body); break;
       case 'list_users': result = listUsers_(body); break;
+      case 'approval_users': result = approvalUsers_(body); break;
       case 'set_user': result = setUser_(body); break;
       case 'delete_user': result = deleteUser_(body); break;
       case 'change_password': result = changePassword_(body); break;
@@ -112,7 +113,7 @@ function health_() {
     initialized: users.length > 0,
     user_count: users.length,
     root: {id: root.getId(), name: root.getName(), url: root.getUrl()},
-    version: '6.2',
+    version: '6.7',
     approval_role_schema: 'approval_role+approval_group-compatible',
     direct_upload: true,
     max_file_bytes: MAX_DIRECT_UPLOAD_BYTES,
@@ -176,6 +177,17 @@ function rootInfo_(body) {
 function listUsers_(body) {
   const session = requireRole_(body, ['admin']);
   return {users: readUsers_().map(publicUser_), requested_by: session.email};
+}
+
+function approvalUsers_(body) {
+  // V6.7: mọi user đã đăng nhập được đọc danh bạ phê duyệt tối thiểu
+  // (chỉ publicUser, không có salt/password_hash) để tự định tuyến workflow.
+  const session = requireSession_(body);
+  const users = readUsers_()
+    .filter(function(u){ return u.active !== false; })
+    .map(publicUser_)
+    .filter(function(u){ return normalizeApprovalRole_(u.approval_role || u.approval_group || '') !== ''; });
+  return {users: users, requested_by: session.email};
 }
 
 function setUser_(body) {

@@ -125,6 +125,14 @@ class DriveGateway:
     def list_users(self, session_token: str) -> list[dict[str, Any]]:
         return list(self._post("list_users", session_token=session_token).get("users") or [])
 
+    def approval_users(self, session_token: str) -> list[dict[str, Any]]:
+        """Danh sách user đang hoạt động dùng để định tuyến phê duyệt.
+
+        Khác list_users (chỉ Admin), endpoint này chỉ trả publicUser và được phép
+        cho mọi tài khoản đã đăng nhập để Nhà thầu có thể tự trình hồ sơ.
+        """
+        return list(self._post("approval_users", session_token=session_token).get("users") or [])
+
     def set_user(self, session_token: str, email: str, name: str, role: str, password: str = "", approval_role: str = "") -> dict[str, Any]:
         # V6.2 compatibility: some V6.0/V6.1 Apps Script deployments used
         # ``approval_group`` while newer builds use ``approval_role``. Send both
