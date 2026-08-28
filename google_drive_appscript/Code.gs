@@ -58,6 +58,7 @@ function doPost(e) {
       case 'set_user': result = setUser_(body); break;
       case 'delete_user': result = deleteUser_(body); break;
       case 'change_password': result = changePassword_(body); break;
+      case 'send_approval_email': result = sendApprovalEmail_(body); break;
       case 'create_upload_ticket': result = createUploadTicket_(body); break;
       case 'list_record_files': result = listRecordFiles_(body); break;
       case 'record_file_counts': result = recordFileCounts_(body); break;
@@ -144,6 +145,7 @@ function bootstrap_(body) {
 function login_(body) {
   const email = normalizeEmail_(body.email);
   const password = String(body.password || '');
+  const approvalRole = normalizeApprovalRole_(body.approval_role);
   const users = readUsers_();
   const u = users.find(x => x.email === email && x.active !== false);
   if (!u || passwordHash_(u.salt, password) !== u.password_hash) {
@@ -181,6 +183,7 @@ function setUser_(body) {
   const role = normalizeRole_(body.role);
   const name = String(body.name || '').trim();
   const password = String(body.password || '');
+  const approvalRole = normalizeApprovalRole_(body.approval_role);
 
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
@@ -189,11 +192,12 @@ function setUser_(body) {
     let idx = users.findIndex(x => x.email === email);
     if (idx < 0) {
       validatePassword_(password);
-      users.push(newUser_(email, name, role, password));
+      users.push(newUser_(email, name, role, password, approvalRole));
       idx = users.length - 1;
     } else {
       users[idx].name = name || users[idx].name || '';
       users[idx].role = role;
+      users[idx].approval_role = approvalRole;
       users[idx].active = true;
       users[idx].updated_at = new Date().toISOString();
       if (password) {
@@ -974,14 +978,14 @@ function audit_(action, actor, target, detail) {
   } catch (ignore) {}
 }
 
-function newUser_(email, name, role, password) {
+function newUser_(email, name, role, password, approvalRole) {
   const salt = randomSecret_();
   const now = new Date().toISOString();
-  return {email: email, name: name || '', role: normalizeRole_(role), active: true, salt: salt, password_hash: passwordHash_(salt, password), created_at: now, updated_at: now};
+  return {email: email, name: name || '', role: normalizeRole_(role), approval_role: normalizeApprovalRole_(approvalRole), active: true, salt: salt, password_hash: passwordHash_(salt, password), created_at: now, updated_at: now};
 }
 
 function publicUser_(u) {
-  return {email: u.email, name: u.name || '', role: u.role, active: u.active !== false, created_at: u.created_at || '', updated_at: u.updated_at || ''};
+  return {email: u.email, name: u.name || '', role: u.role, approval_role: u.approval_role || '', active: u.active !== false, created_at: u.created_at || '', updated_at: u.updated_at || ''};
 }
 
 function currentUserRecord_(email) {
@@ -996,6 +1000,7 @@ function requireSession_(body) {
   const u = currentUserRecord_(session.email);
   session.role = u.role;
   session.name = u.name || '';
+  session.approval_role = u.approval_role || '';
   return session;
 }
 
@@ -1068,6 +1073,32 @@ function normalizeRole_(role) {
   const r = String(role || '').toLowerCase();
   if (['read', 'update', 'admin'].indexOf(r) < 0) throw new Error('Quyền không hợp lệ.');
   return r;
+}
+
+function normalizeApprovalRole_(role) {
+  const r = String(role || '').trim().toUpperCase();
+  const allowed = ['', 'CONTRACTOR', 'SITE_MANAGEMENT', 'CONSULTANT', 'PROJECT_MANAGEMENT'];
+  if (allowed.indexOf(r) < 0) throw new Error('Phân loại phê duyệt không hợp lệ.');
+  return r;
+}
+
+function sendApprovalEmail_(body) {
+  const session = requireRole_(body, ['update', 'admin']);
+  const to = normalizeEmail_(body.to_email);
+  const users = readUsers_();
+  const target = users.find(x => x.email === to && x.active !== false);
+  if (!target) throw new Error('Email người nhận chưa được khai báo trong danh sách người dùng QLDA.');
+  const subject = String(body.subject || 'QLDA - Hồ sơ cần phê duyệt').substring(0, 180);
+  const text = String(body.body || '').substring(0, 12000);
+  const appUrl = String(body.app_url || '').trim();
+  const html = '<div style="font-family:Arial,sans-serif;line-height:1.5">' +
+    '<h3>' + escapeHtml_(subject) + '</h3>' +
+    '<div>' + escapeHtml_(text).replace(/\n/g,'<br>') + '</div>' +
+    (appUrl ? '<p><a href="' + escapeHtml_(appUrl) + '">Mở QLDA để xem và phê duyệt</a></p>' : '') +
+    '<p style="color:#666">Email tự động từ QLDA Xây dựng V6.</p></div>';
+  MailApp.sendEmail({to: to, subject: subject, htmlBody: html, name: 'QLDA Xây dựng'});
+  audit_('APPROVAL_EMAIL', session.email, to, subject);
+  return {sent: true, to_email: to};
 }
 
 function sanitizeName_(value) {

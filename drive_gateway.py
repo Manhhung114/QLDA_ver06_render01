@@ -125,10 +125,17 @@ class DriveGateway:
     def list_users(self, session_token: str) -> list[dict[str, Any]]:
         return list(self._post("list_users", session_token=session_token).get("users") or [])
 
-    def set_user(self, session_token: str, email: str, name: str, role: str, password: str = "") -> dict[str, Any]:
+    def set_user(self, session_token: str, email: str, name: str, role: str, password: str = "", approval_role: str = "") -> dict[str, Any]:
         return self._post(
             "set_user",
-            {"email": email, "name": name, "role": role, "password": password},
+            {"email": email, "name": name, "role": role, "password": password, "approval_role": approval_role},
+            session_token=session_token,
+        )
+
+    def send_approval_email(self, session_token: str, *, to_email: str, subject: str, body: str, app_url: str = "") -> dict[str, Any]:
+        return self._post(
+            "send_approval_email",
+            {"to_email": to_email, "subject": subject, "body": body, "app_url": app_url},
             session_token=session_token,
         )
 

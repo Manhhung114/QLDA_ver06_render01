@@ -155,6 +155,13 @@ DRAWING_STATUSES = [
     "Mới nhận", "Đang kiểm tra", "Chờ phản hồi", "Chấp thuận",
     "Chấp thuận có điều kiện", "Cần sửa", "Thay thế", "Hủy",
 ]
+for _approval_doc_type in ("RFA", "RFI"):
+    for _s in ("Đang phê duyệt", "Đang duyệt - Ban điều hành", "Đang duyệt - Tư vấn giám sát", "Đang duyệt - Ban quản lý dự án", "Yêu cầu chỉnh sửa - Ban điều hành", "Yêu cầu chỉnh sửa - Tư vấn giám sát", "Yêu cầu chỉnh sửa - Ban quản lý dự án", "Đã phê duyệt"):
+        if _s not in DOC_CONFIG[_approval_doc_type]["statuses"]:
+            DOC_CONFIG[_approval_doc_type]["statuses"].append(_s)
+for _s in ("Đang phê duyệt", "Đang duyệt - Ban điều hành", "Đang duyệt - Tư vấn giám sát", "Đang duyệt - Ban quản lý dự án", "Yêu cầu chỉnh sửa - Ban điều hành", "Yêu cầu chỉnh sửa - Tư vấn giám sát", "Yêu cầu chỉnh sửa - Ban quản lý dự án", "Đã phê duyệt"):
+    if _s not in DRAWING_STATUSES:
+        DRAWING_STATUSES.append(_s)
 TASK_STATUSES = ["Tất cả", "Chưa bắt đầu", "Đúng tiến độ", "Nhanh tiến độ", "Chậm tiến độ", "Hoàn thành", "Đang thực hiện", "Chưa xác định"]
 
 EXECUTION_CODE_RE = re.compile(r"^[A-Z]+\d+-[A-Z0-9]+-\d{3,}$")
@@ -746,6 +753,136 @@ def _trash_record_drive_files(pid: int, *, kind: str, subtype: str, record_code:
     return deleted, errors
 
 
+APPROVAL_ROLE_LABELS = {
+    "": "Không tham gia duyệt",
+    "CONTRACTOR": "Nhà thầu",
+    "SITE_MANAGEMENT": "Ban điều hành",
+    "CONSULTANT": "Tư vấn giám sát",
+    "PROJECT_MANAGEMENT": "Ban quản lý dự án",
+}
+APPROVAL_ELIGIBLE_DOCS = {"RFA", "RFI"}
+APPROVAL_ELIGIBLE_DRAWINGS = {"SHOPDRAWING", "AS_BUILT"}
+
+
+def _app_public_url() -> str:
+    explicit = str(os.environ.get("QLDA_APP_URL", "") or "").strip()
+    if explicit:
+        return explicit
+    railway = str(os.environ.get("RAILWAY_PUBLIC_DOMAIN", "") or "").strip()
+    if railway:
+        return railway if railway.startswith("http") else "https://" + railway
+    render = str(os.environ.get("RENDER_EXTERNAL_URL", "") or "").strip()
+    return render
+
+
+def _approval_users() -> list[dict]:
+    try:
+        return _drive_gateway().list_users(_gateway_session_token())
+    except Exception:
+        return []
+
+
+def _send_approval_notice(to_email: str, record_code: str, record_title: str, status: str, comment: str = "") -> None:
+    if not to_email:
+        return
+    try:
+        _drive_gateway().send_approval_email(
+            _gateway_session_token(),
+            to_email=to_email,
+            subject=f"QLDA - {record_code} cần xử lý phê duyệt",
+            body=(f"Hồ sơ/Bản vẽ: {record_code}\nNội dung: {record_title}\nTrạng thái: {status}" + (f"\nÝ kiến: {comment}" if comment else "")),
+            app_url=_app_public_url(),
+        )
+    except Exception as exc:
+        st.warning(f"Đã chuyển bước duyệt nhưng chưa gửi được email: {exc}")
+
+
+def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id: int, record_code: str, record_title: str) -> None:
+    eligible = subtype in (APPROVAL_ELIGIBLE_DOCS if record_kind == "document" else APPROVAL_ELIGIBLE_DRAWINGS)
+    if not eligible:
+        return
+    st.markdown("### ✅ Phê duyệt online")
+    identity = _cloud_identity()
+    email = str(identity.get("email") or "").lower()
+    approval_role = str(identity.get("approval_role") or "")
+    wf = db.approval_workflow(pid, record_kind, subtype, record_id)
+
+    if not wf:
+        users = _approval_users()
+        by_role = {}
+        for u in users:
+            ar = str(u.get("approval_role") or "")
+            if ar:
+                by_role.setdefault(ar, []).append(u)
+        contractor_ok = approval_role == "CONTRACTOR" or _is_admin()
+        if not contractor_ok:
+            st.info("Hồ sơ chưa được nhà thầu trình duyệt.")
+            return
+        missing = [r for r in ("SITE_MANAGEMENT", "CONSULTANT", "PROJECT_MANAGEMENT") if not by_role.get(r)]
+        if missing:
+            st.warning("Chưa khai báo người duyệt cho: " + ", ".join(APPROVAL_ROLE_LABELS[x] for x in missing))
+            return
+        c1, c2, c3 = st.columns(3)
+        selected_approvers = {}
+        for col, role_code in zip((c1, c2, c3), ("SITE_MANAGEMENT", "CONSULTANT", "PROJECT_MANAGEMENT")):
+            opts = by_role[role_code]
+            choice = col.selectbox(APPROVAL_ROLE_LABELS[role_code], opts, format_func=lambda u: f"{u.get('name','')} • {u.get('email','')}", key=f"approver_{record_kind}_{subtype}_{record_id}_{role_code}")
+            selected_approvers[role_code] = choice
+        if st.button("📤 Trình phê duyệt", type="primary", key=f"submit_approval_{record_kind}_{subtype}_{record_id}"):
+            approvers = {"CONTRACTOR": {"email": email, "name": identity.get("name", "")}, **selected_approvers}
+            db.start_approval_workflow(pid, record_kind, subtype, record_id, record_code, email, approvers)
+            first = selected_approvers["SITE_MANAGEMENT"]
+            _send_approval_notice(first.get("email", ""), record_code, record_title, "Chờ Ban điều hành phê duyệt")
+            st.success("Đã trình phê duyệt và gửi thông báo cho Ban điều hành.")
+            st.rerun()
+        return
+
+    steps = db.approval_steps(int(wf["id"]))
+    st.success(f"Trạng thái: {wf['overall_status']}" if wf["overall_status"] == "Đã phê duyệt" else f"Trạng thái: {wf['overall_status']}")
+    cols = st.columns(4)
+    for col, step in zip(cols, steps):
+        with col:
+            status = str(step["status"] or "")
+            icon = "✅" if status in {"Đã duyệt", "Đã trình"} else ("🟡" if status == "Đang chờ duyệt" else ("🔴" if "chỉnh sửa" in status.lower() else "⚪"))
+            st.markdown(f"**{icon} {step['stage_label']}**")
+            st.write(step["approver_name"] or step["approver_email"] or "—")
+            st.write(status)
+            if step["comment"]:
+                st.write("💬 " + str(step["comment"]))
+            if step["acted_at"]:
+                st.write(str(step["acted_at"])[:19])
+
+    current_stage = str(wf["current_stage"] or "")
+    current_step = next((x for x in steps if str(x["stage_code"]) == current_stage), None)
+    if current_step and current_stage not in {"DONE", "CONTRACTOR"} and str(current_step["approver_email"] or "").lower() == email:
+        comment = st.text_area("Ý kiến / Comment của người duyệt", key=f"approval_comment_{wf['id']}_{current_stage}")
+        b1, b2 = st.columns(2)
+        if b1.button("✅ Phê duyệt", type="primary", key=f"approve_{wf['id']}_{current_stage}"):
+            result = db.approval_action(int(wf["id"]), current_stage, email, "APPROVE", comment)
+            _send_approval_notice(result.get("next_email", ""), record_code, record_title, result.get("status", ""), comment)
+            st.rerun()
+        if b2.button("↩️ Yêu cầu chỉnh sửa", key=f"reject_{wf['id']}_{current_stage}"):
+            if not comment.strip():
+                st.error("Cần nhập comment khi yêu cầu chỉnh sửa.")
+            else:
+                result = db.approval_action(int(wf["id"]), current_stage, email, "REJECT", comment)
+                _send_approval_notice(result.get("next_email", ""), record_code, record_title, result.get("status", ""), comment)
+                st.rerun()
+    elif current_stage == "CONTRACTOR" and (approval_role == "CONTRACTOR" or _is_admin()):
+        st.warning("Hồ sơ đã bị yêu cầu chỉnh sửa. Sau khi cập nhật file/nội dung, hãy trình lại quy trình duyệt.")
+        if st.button("🔄 Trình lại sau chỉnh sửa", key=f"resubmit_{wf['id']}"):
+            users = _approval_users(); by_role={}
+            for u in users:
+                ar=str(u.get('approval_role') or '')
+                if ar: by_role.setdefault(ar,[]).append(u)
+            approvers={"CONTRACTOR":{"email":email,"name":identity.get('name','')}}
+            old_steps={str(x['stage_code']):x for x in steps}
+            for rc in ("SITE_MANAGEMENT","CONSULTANT","PROJECT_MANAGEMENT"):
+                old=old_steps.get(rc); approvers[rc]={"email": old['approver_email'] if old else '', "name": old['approver_name'] if old else ''}
+            db.start_approval_workflow(pid, record_kind, subtype, record_id, record_code, email, approvers)
+            _send_approval_notice(approvers['SITE_MANAGEMENT']['email'], record_code, record_title, "Trình lại - Chờ Ban điều hành phê duyệt")
+            st.rerun()
+
 def render_document_type(pid: int, doc_type: str):
     cfg = DOC_CONFIG[doc_type]
     rows = db.documents(pid, doc_type)
@@ -853,6 +990,7 @@ def render_document_type(pid: int, doc_type: str):
                 record_id=int(selected),
                 panel_key=panel_key,
             )
+            _render_online_approval(pid, "document", doc_type, int(selected), str(current["code"] or ""), str(current["subject"] or ""))
 
         arows = db.document_attachments(selected)
         if arows:
@@ -921,7 +1059,7 @@ def render_document_type(pid: int, doc_type: str):
                 "Chọn": False, "ID": r["id"], "Tháp": tower, "Mã": code_value, "Nội dung": r["subject"], "Bộ môn": discipline_value,
                 "Nhà thầu": r["contractor"], "Phát hành": r["issue_date"], "Hạn": r["due_date"],
                 "Trạng thái": status_value, "Mức độ": r["priority"], "Theo dõi hạn": document_deadline_label(r, doc_type),
-                "WBS/Task": r["related_wbs"], "Ghi chú": r["note"], "File DB": file_label,
+                "WBS/Task": r["related_wbs"], "Ghi chú": r["note"], "Duyệt online": (db.approval_workflow(pid, "document", doc_type, int(r["id"]))["overall_status"] if db.approval_workflow(pid, "document", doc_type, int(r["id"])) else "—") if doc_type in APPROVAL_ELIGIBLE_DOCS else "—", "File DB": file_label,
             })
             visible_row_ids.append(int(r["id"]))
         if not table_rows:
@@ -1247,6 +1385,7 @@ def render_drawing_type(pid: int, drawing_type: str):
                 record_id=int(selected),
                 panel_key=panel_key,
             )
+            _render_online_approval(pid, "drawing", drawing_type, int(selected), str(current["drawing_no"] or ""), str(current["title"] or ""))
 
         arows = db.drawing_attachments(selected)
         if arows:
@@ -1316,7 +1455,7 @@ def render_drawing_type(pid: int, drawing_type: str):
                 "Chọn": False, "ID": r["id"], "Tháp": tower, "Mã bản vẽ": code_value, "Tên bản vẽ": r["title"], "Bộ môn/Hệ": discipline_value,
                 "Revision": r["revision"], "Đơn vị phát hành": r["issuer"], "Người nhận": r["receiver"],
                 "Ngày nhận": r["received_date"], "Ngày phát hành": r["issue_date"], "Trạng thái": status_value,
-                "WBS/Task": r["related_wbs"], "Tham chiếu/Thay thế": r["reference_no"], "Ghi chú": r["note"], "File DB": file_label,
+                "WBS/Task": r["related_wbs"], "Tham chiếu/Thay thế": r["reference_no"], "Ghi chú": r["note"], "Duyệt online": (db.approval_workflow(pid, "document", doc_type, int(r["id"]))["overall_status"] if db.approval_workflow(pid, "document", doc_type, int(r["id"])) else "—") if doc_type in APPROVAL_ELIGIBLE_DOCS else "—", "File DB": file_label,
                 "Cập nhật file gần nhất": latest,
             })
             visible_row_ids.append(int(r["id"]))
@@ -2203,6 +2342,7 @@ def _cloud_identity(refresh: bool = False):
             "role": role,
             "email": str(user.get("email") or ""),
             "name": str(user.get("name") or ""),
+            "approval_role": str(user.get("approval_role") or ""),
             "label": {"read": "Chỉ đọc", "update": "Cập nhật", "admin": "Admin"}.get(role, "Chưa xác định"),
         }
         st.session_state["qlda_drive_identity"] = identity
@@ -2633,11 +2773,12 @@ def render_settings():
                         pemail = c1.text_input("Email người dùng")
                         pname = c2.text_input("Tên người dùng")
                         prole = c1.selectbox("Quyền", ["read", "update", "admin"], format_func=lambda x: {"read":"Chỉ đọc","update":"Cập nhật","admin":"Admin"}[x])
+                        papproval = c2.selectbox("Phân loại phê duyệt", ["", "CONTRACTOR", "SITE_MANAGEMENT", "CONSULTANT", "PROJECT_MANAGEMENT"], format_func=lambda x: APPROVAL_ROLE_LABELS.get(x, x))
                         ppass = c2.text_input("Mật khẩu khởi tạo / mật khẩu mới (để trống nếu không đổi)", type="password")
                         save_user = st.form_submit_button("Thêm / cập nhật người dùng", type="primary")
                     if save_user:
                         try:
-                            gw.set_user(token, pemail, pname, prole, ppass)
+                            gw.set_user(token, pemail, pname, prole, ppass, papproval)
                             st.success("Đã cập nhật người dùng và quyền Google Drive.")
                             st.rerun()
                         except Exception as exc:
@@ -2653,6 +2794,7 @@ def render_settings():
                             "Tên": u.get("name", ""),
                             "Email": u.get("email", ""),
                             "Quyền": {"read":"Chỉ đọc","update":"Cập nhật","admin":"Admin"}.get(u.get("role", ""), u.get("role", "")),
+                            "Phân loại duyệt": APPROVAL_ROLE_LABELS.get(u.get("approval_role", ""), u.get("approval_role", "")),
                             "Hoạt động": "Có" if u.get("active", True) else "Không",
                             "Cập nhật": u.get("updated_at", ""),
                         } for u in users])
