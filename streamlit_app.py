@@ -587,7 +587,7 @@ def _prepare_inline_upload_ticket(pid: int, *, kind: str, subtype: str, record_c
     return upload
 
 
-def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, record_code: str, record_id: int, panel_key: str) -> None:
+def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, record_code: str, record_id: int, panel_key: str) -> int:
     """V6.0: file nằm ngay dưới nút Đính kèm file, không còn nút Cập nhật riêng.
 
     File lớn vẫn đi theo V5 resumable flow: trình duyệt -> Apps Script -> Drive,
@@ -598,11 +598,11 @@ def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, recor
     project = db.project(pid)
     if not project:
         st.warning("Không tìm thấy dự án.")
-        return
+        return 0
     token = _gateway_session_token()
     if not token:
         st.warning("Phiên Google Drive đã hết hạn. Hãy đăng nhập lại.")
-        return
+        return 0
 
     upload = st.session_state.get(panel_key + "_ticket") or {}
     upload_open = bool(st.session_state.get(panel_key + "_upload_open"))
@@ -633,15 +633,17 @@ def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, recor
         )
     except Exception as exc:
         st.error(f"Không đọc được danh sách file Google Drive: {exc}")
-        return
+        return 0
 
     folder = data.get("folder") or {}
     files = data.get("files") or []
+    total_file_count = len(files)
+    current_file_count = sum(1 for item in files if not item.get("history"))
     if folder.get("url"):
         st.link_button("📂 Mở thư mục trên Google Drive", folder["url"], width="content")
     if not files:
         _ui_note("Chưa có file trên Google Drive.")
-        return
+        return 0
 
     st.markdown("**Danh sách file Google Drive**")
     file_filter = st.text_input("🔎 Lọc file cần xem", key=panel_key + "_inline_file_filter").strip().lower()
@@ -649,7 +651,7 @@ def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, recor
         files = [x for x in files if file_filter in str(x.get("name") or "").lower()]
     if not files:
         st.info("Không có file phù hợp bộ lọc.")
-        return
+        return current_file_count
 
     checked_ids: list[tuple[str, str]] = []
     for idx, item in enumerate(files):
@@ -698,6 +700,8 @@ def _render_inline_drive_attachments(pid: int, *, kind: str, subtype: str, recor
             st.rerun()
     else:
         _ui_note("🔒 Quyền Cập nhật/Chỉ đọc không được xóa file. Ô tick xóa chỉ hoạt động với Admin.")
+
+    return current_file_count
 
 
 def _record_drive_counts(pid: int, *, kind: str, subtype: str, record_codes) -> dict[str, dict]:
@@ -831,7 +835,7 @@ def _send_approval_notice(to_email: str, record_code: str, record_title: str, st
         st.warning(f"Đã chuyển bước duyệt nhưng chưa gửi được email: {exc}")
 
 
-def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id: int, record_code: str, record_title: str) -> None:
+def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id: int, record_code: str, record_title: str, attachment_count: int | None = None) -> None:
     eligible = subtype in (APPROVAL_ELIGIBLE_DOCS if record_kind == "document" else APPROVAL_ELIGIBLE_DRAWINGS)
     if not eligible:
         return
@@ -845,6 +849,8 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
     display_name = str(identity.get("name") or "")
     approval_role = _user_approval_role(identity)
     wf = db.approval_workflow(pid, record_kind, subtype, record_id)
+    attachment_required = subtype in {"RFA", "RFI", "SHOPDRAWING"}
+    has_submission_file = (not attachment_required) or int(attachment_count or 0) > 0
 
     if not wf:
         users = _approval_users()
@@ -877,7 +883,14 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
             )
             selected_approvers[role_code] = choice
 
-        if st.button("📤 Trình phê duyệt", type="primary", key=f"submit_approval_{record_kind}_{subtype}_{record_id}"):
+        if attachment_required and not has_submission_file:
+            st.warning("📎 Cần tải ít nhất 01 tệp trình duyệt trước khi gửi vào luồng phê duyệt.")
+        if st.button(
+            "📤 Trình phê duyệt",
+            type="primary",
+            key=f"submit_approval_{record_kind}_{subtype}_{record_id}",
+            disabled=not has_submission_file,
+        ):
             approvers = {"CONTRACTOR": {"email": email, "name": display_name}, **selected_approvers}
             db.start_approval_workflow(
                 pid, record_kind, subtype, record_id, record_code, email, approvers, submitted_name=display_name
@@ -986,8 +999,15 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
             key=f"approval_comment_{wf['id']}_{current_stage}_{revision_no}",
             placeholder="Có thể nhập ý kiến khi phê duyệt; bắt buộc nhập khi yêu cầu chỉnh sửa.",
         )
+        if attachment_required and not has_submission_file:
+            st.warning("📎 Hồ sơ chưa có tệp trình duyệt. Không thể phê duyệt cho đến khi Nhà thầu tải tệp lên; vẫn có thể Yêu cầu chỉnh sửa.")
         b1, b2 = st.columns(2)
-        if b1.button("✅ Phê duyệt", type="primary", key=f"approve_{wf['id']}_{current_stage}_{revision_no}"):
+        if b1.button(
+            "✅ Phê duyệt",
+            type="primary",
+            key=f"approve_{wf['id']}_{current_stage}_{revision_no}",
+            disabled=not has_submission_file,
+        ):
             result = db.approval_action(
                 int(wf["id"]), current_stage, email, "APPROVE", comment, actor_name=display_name
             )
@@ -1015,7 +1035,14 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
         if latest_comment:
             message += f"\n\n**Ý kiến cần xử lý:** {latest_comment}"
         st.warning(message)
-        if st.button("🔄 Trình lại sau chỉnh sửa", type="primary", key=f"resubmit_{wf['id']}_{revision_no}"):
+        if attachment_required and not has_submission_file:
+            st.warning("📎 Cần có ít nhất 01 tệp trình duyệt trước khi trình lại hồ sơ.")
+        if st.button(
+            "🔄 Trình lại sau chỉnh sửa",
+            type="primary",
+            key=f"resubmit_{wf['id']}_{revision_no}",
+            disabled=not has_submission_file,
+        ):
             result = db.resubmit_approval_workflow(int(wf["id"]), email, submitted_name=display_name)
             _send_approval_notice(
                 result.get("next_email", ""), record_code, record_title, result.get("status", ""),
@@ -1133,9 +1160,11 @@ def _render_approval_document_type(pid: int, doc_type: str):
             )
             description = st.text_area("Mô tả", value=(record["description"] if record else ""), height=120)
 
-            save_clicked = st.form_submit_button("💾 Lưu hồ sơ", type="primary", width="stretch")
+            sb1, sb2 = st.columns(2)
+            save_clicked = sb1.form_submit_button("💾 Lưu hồ sơ", type="primary", width="stretch")
+            save_upload_clicked = sb2.form_submit_button("📎 Lưu & tải tệp trình duyệt", width="stretch")
 
-        if save_clicked:
+        if save_clicked or save_upload_clicked:
             normalized_code = _normalize_execution_code(code)
             if not normalized_code or not subject.strip():
                 st.error("Mã hồ sơ và nội dung trình duyệt là bắt buộc.")
@@ -1165,6 +1194,8 @@ def _render_approval_document_type(pid: int, doc_type: str):
                         "time_impact_days": int(record["time_impact_days"] or 0) if record and "time_impact_days" in record.keys() else 0,
                     }, selected)
                     st.session_state[pending_key] = doc_id
+                    if save_upload_clicked:
+                        st.session_state[f"submission_upload_after_save_document_{pid}_{doc_type}"] = int(doc_id)
                     st.session_state[flash_key] = "Đã lưu hồ sơ."
                     st.rerun()
                 except sqlite3.IntegrityError:
@@ -1187,12 +1218,40 @@ def _render_approval_document_type(pid: int, doc_type: str):
         c3.text_input(cfg.get("due_date_label", "Hạn xử lý"), value=str(record["due_date"] or ""), disabled=True, key=f"view_due_{pid}_{doc_type}_{selected}")
         st.text_area("Mô tả", value=str(record["description"] or ""), disabled=True, height=120, key=f"view_description_{pid}_{doc_type}_{selected}")
 
-    # --------- Upload lưu trữ tách riêng khỏi quyền Nhà thầu / quyền duyệt ---------
+    # --------- Tệp trình duyệt / tệp lưu trữ ---------
+    # Nhà thầu luôn có nút tải tệp trình duyệt sau khi hồ sơ đã được lưu.
+    # Người duyệt xem/tải tệp trước khi xử lý. Tài khoản Update/Admin không phải
+    # Nhà thầu vẫn có nút tải file lên lưu trữ độc lập với vai trò phê duyệt.
     if selected:
         current = db.document(selected)
         if current:
             panel_key = f"v6_doc_attach_{pid}_{doc_type}_{selected}"
-            if can_upload_storage:
+            auto_upload_key = f"submission_upload_after_save_document_{pid}_{doc_type}"
+            auto_open = st.session_state.pop(auto_upload_key, None) == int(selected)
+
+            if is_contractor:
+                st.markdown("#### 📎 Tệp trình duyệt")
+                st.caption("Tải bản PDF/DWG/XLSX hoặc tài liệu liên quan để Ban điều hành, TVGS và Ban QLDA xem trước khi phê duyệt.")
+                open_submission_upload = st.button(
+                    "📎 Tải tệp trình duyệt lên",
+                    type="primary",
+                    key=f"approval_doc_submission_upload_{pid}_{doc_type}_{selected}",
+                    width="stretch",
+                )
+                if open_submission_upload or auto_open:
+                    try:
+                        st.session_state.pop(panel_key + "_ticket", None)
+                        st.session_state.pop(panel_key + "_upload_open", None)
+                        _prepare_inline_upload_ticket(
+                            pid,
+                            kind="document",
+                            subtype=doc_type,
+                            record_code=str(current["code"] or ""),
+                            panel_key=panel_key,
+                        )
+                    except Exception as exc:
+                        st.error(f"Chưa mở được vùng tải tệp trình duyệt: {exc}")
+            elif can_upload_storage:
                 if st.button(
                     "📤 Tải file lên lưu",
                     key=f"approval_doc_upload_{pid}_{doc_type}_{selected}",
@@ -1208,11 +1267,10 @@ def _render_approval_document_type(pid: int, doc_type: str):
                             record_code=str(current["code"] or ""),
                             panel_key=panel_key,
                         )
-                        st.rerun()
                     except Exception as exc:
                         st.error(f"Chưa mở được vùng tải file: {exc}")
 
-            _render_inline_drive_attachments(
+            attachment_count = _render_inline_drive_attachments(
                 pid,
                 kind="document",
                 subtype=doc_type,
@@ -1220,6 +1278,12 @@ def _render_approval_document_type(pid: int, doc_type: str):
                 record_id=int(selected),
                 panel_key=panel_key,
             )
+
+            if is_reviewer:
+                if attachment_count:
+                    st.success(f"📎 Có {attachment_count} tệp trình duyệt. Hãy mở/xem tệp phía trên trước khi phê duyệt.")
+                else:
+                    st.warning("📎 Chưa có tệp trình duyệt do Nhà thầu tải lên.")
 
             if is_contractor or is_reviewer:
                 _render_online_approval(
@@ -1229,7 +1293,10 @@ def _render_approval_document_type(pid: int, doc_type: str):
                     int(selected),
                     str(current["code"] or ""),
                     str(current["subject"] or ""),
+                    attachment_count=attachment_count,
                 )
+    elif is_contractor:
+        st.info("📎 Sau khi lưu hồ sơ, nút **Tải tệp trình duyệt** sẽ xuất hiện ngay tại đây.")
 
     # --------- Danh sách hồ sơ: chỉ các cột cần thiết cho RFA/RFI ---------
     if rows:
@@ -1889,9 +1956,11 @@ def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING
             )
             description_value = record["description"] if record and "description" in record.keys() else ""
             description = st.text_area("Mô tả", value=description_value, height=120)
-            save_clicked = st.form_submit_button("💾 Lưu Shopdrawing", type="primary", width="stretch")
+            sb1, sb2 = st.columns(2)
+            save_clicked = sb1.form_submit_button("💾 Lưu Shopdrawing", type="primary", width="stretch")
+            save_upload_clicked = sb2.form_submit_button("📎 Lưu & tải tệp trình duyệt", width="stretch")
 
-        if save_clicked:
+        if save_clicked or save_upload_clicked:
             normalized_number = _normalize_execution_code(number)
             if not normalized_number or not title.strip():
                 st.error("Mã Shopdrawing và nội dung trình duyệt là bắt buộc.")
@@ -1917,6 +1986,8 @@ def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING
                         "note": record["note"] if record else "",
                     }, selected)
                     st.session_state[pending_key] = drawing_id
+                    if save_upload_clicked:
+                        st.session_state[f"submission_upload_after_save_drawing_{pid}_{drawing_type}"] = int(drawing_id)
                     st.session_state[flash_key] = "Đã lưu Shopdrawing."
                     st.rerun()
                 except sqlite3.IntegrityError:
@@ -1944,12 +2015,37 @@ def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING
         description_value = str(record["description"] or "") if "description" in record.keys() else ""
         st.text_area("Mô tả", value=description_value, disabled=True, height=120, key=f"view_sd_desc_{pid}_{selected}")
 
-    # --------- Upload lưu trữ độc lập với quyền phê duyệt ---------
+    # --------- Tệp trình duyệt / tệp lưu trữ ---------
     if selected:
         current = db.drawing(selected)
         if current:
             panel_key = f"v6_drawing_attach_{pid}_{drawing_type}_{selected}"
-            if can_upload_storage:
+            auto_upload_key = f"submission_upload_after_save_drawing_{pid}_{drawing_type}"
+            auto_open = st.session_state.pop(auto_upload_key, None) == int(selected)
+
+            if is_contractor:
+                st.markdown("#### 📎 Tệp trình duyệt Shopdrawing")
+                st.caption("Tải bản vẽ/PDF và tài liệu liên quan để các cấp duyệt mở xem trước khi phê duyệt.")
+                open_submission_upload = st.button(
+                    "📎 Tải tệp Shopdrawing trình duyệt lên",
+                    type="primary",
+                    key=f"approval_drawing_submission_upload_{pid}_{drawing_type}_{selected}",
+                    width="stretch",
+                )
+                if open_submission_upload or auto_open:
+                    try:
+                        st.session_state.pop(panel_key + "_ticket", None)
+                        st.session_state.pop(panel_key + "_upload_open", None)
+                        _prepare_inline_upload_ticket(
+                            pid,
+                            kind="drawing",
+                            subtype=drawing_type,
+                            record_code=str(current["drawing_no"] or ""),
+                            panel_key=panel_key,
+                        )
+                    except Exception as exc:
+                        st.error(f"Chưa mở được vùng tải tệp Shopdrawing: {exc}")
+            elif can_upload_storage:
                 if st.button(
                     "📤 Tải file lên lưu",
                     key=f"approval_drawing_upload_{pid}_{drawing_type}_{selected}",
@@ -1965,11 +2061,10 @@ def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING
                             record_code=str(current["drawing_no"] or ""),
                             panel_key=panel_key,
                         )
-                        st.rerun()
                     except Exception as exc:
                         st.error(f"Chưa mở được vùng tải file: {exc}")
 
-            _render_inline_drive_attachments(
+            attachment_count = _render_inline_drive_attachments(
                 pid,
                 kind="drawing",
                 subtype=drawing_type,
@@ -1977,6 +2072,12 @@ def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING
                 record_id=int(selected),
                 panel_key=panel_key,
             )
+
+            if is_reviewer:
+                if attachment_count:
+                    st.success(f"📎 Có {attachment_count} tệp Shopdrawing. Hãy mở/xem tệp phía trên trước khi phê duyệt.")
+                else:
+                    st.warning("📎 Chưa có tệp Shopdrawing do Nhà thầu tải lên.")
 
             if is_contractor or is_reviewer:
                 _render_online_approval(
@@ -1986,7 +2087,10 @@ def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING
                     int(selected),
                     str(current["drawing_no"] or ""),
                     str(current["title"] or ""),
+                    attachment_count=attachment_count,
                 )
+    elif is_contractor:
+        st.info("📎 Sau khi lưu Shopdrawing, nút **Tải tệp trình duyệt** sẽ xuất hiện ngay tại đây.")
 
         # Giữ tương thích file legacy từ các phiên bản trước.
         arows = db.drawing_attachments(selected)
