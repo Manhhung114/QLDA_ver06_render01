@@ -213,7 +213,7 @@ class AISettings:
 @dataclass
 class GeminiSettings:
     api_key: str = ""
-    model: str = "gemini-2.5-flash"
+    model: str = "auto"
     use_web: bool = False
 
     @classmethod
@@ -221,7 +221,7 @@ class GeminiSettings:
         web = os.environ.get("AI_WEB_SEARCH", os.environ.get("GEMINI_WEB_SEARCH", "0"))
         return cls(
             api_key=os.environ.get("GEMINI_API_KEY", "").strip(),
-            model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash",
+            model=os.environ.get("GEMINI_MODEL", "auto").strip() or "auto",
             use_web=str(web or "0").strip().lower() in {"1", "true", "yes", "on"},
         )
 
@@ -256,7 +256,7 @@ def classify_gemini_error(exc) -> AIErrorInfo:
         return AIErrorInfo(
             "model_not_found", "🧩 Gemini model không tồn tại hoặc chưa được cấp quyền",
             "Model đang cấu hình không khả dụng cho API key hiện tại.",
-            "Đổi GEMINI_MODEL, ví dụ gemini-2.5-flash, rồi kiểm tra lại.",
+            "Đặt GEMINI_MODEL=auto để ứng dụng tự chọn model mà API key được phép dùng, rồi kiểm tra lại.",
             False, status or 404,
         )
     if status == 400 or "invalid_argument" in low:
@@ -709,6 +709,8 @@ class GeminiProjectAssistant(OpenAIProjectAssistant):
         self.db_path = Path(db_path)
         self.settings = settings or GeminiSettings.from_env()
         self.context = ProjectContextBuilder(self.db_path)
+        self._resolved_model: str | None = None
+        self._available_models_cache: list[str] | None = None
 
     def _client(self):
         key = (self.settings.api_key or os.environ.get("GEMINI_API_KEY", "")).strip()
@@ -722,7 +724,99 @@ class GeminiProjectAssistant(OpenAIProjectAssistant):
 
     @property
     def model(self) -> str:
-        return (self.settings.model or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")).strip() or "gemini-2.5-flash"
+        configured = (self.settings.model or os.environ.get("GEMINI_MODEL", "auto")).strip() or "auto"
+        return self._resolved_model or configured
+
+    @staticmethod
+    def _normalize_model_name(name: str) -> str:
+        value = str(name or "").strip()
+        return value[7:] if value.startswith("models/") else value
+
+    def _available_generate_models(self, client, *, refresh: bool = False) -> list[str]:
+        if self._available_models_cache is not None and not refresh:
+            return list(self._available_models_cache)
+        found: list[str] = []
+        for item in client.models.list():
+            name = self._normalize_model_name(getattr(item, "name", ""))
+            if not name:
+                continue
+            actions = list(getattr(item, "supported_actions", None) or [])
+            if actions and "generateContent" not in actions:
+                continue
+            if name not in found:
+                found.append(name)
+        self._available_models_cache = found
+        return list(found)
+
+    @staticmethod
+    def _preferred_model_candidates() -> list[str]:
+        # Các model ổn định được ưu tiên theo thứ tự mới -> tương thích rộng.
+        return [
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+        ]
+
+    def _resolve_model(self, client, *, refresh: bool = False, exclude: set[str] | None = None) -> str:
+        exclude = {self._normalize_model_name(x) for x in (exclude or set())}
+        configured = self._normalize_model_name(
+            (self.settings.model or os.environ.get("GEMINI_MODEL", "auto")).strip() or "auto"
+        )
+        try:
+            available = self._available_generate_models(client, refresh=refresh)
+        except Exception:
+            available = []
+
+        # Nếu user chỉ định model và API key thực sự thấy model đó, giữ nguyên lựa chọn.
+        if configured.lower() not in {"", "auto", "default"} and configured not in exclude:
+            if not available or configured in available:
+                self._resolved_model = configured
+                return configured
+
+        if available:
+            for candidate in self._preferred_model_candidates():
+                if candidate in available and candidate not in exclude:
+                    self._resolved_model = candidate
+                    return candidate
+            # Fallback: chọn một model Gemini text/multimodal có generateContent, tránh image/live/tts/embed.
+            for candidate in available:
+                low = candidate.lower()
+                if candidate in exclude:
+                    continue
+                if "gemini" in low and not any(x in low for x in ["image", "live", "tts", "embed", "embedding", "transcribe"]):
+                    self._resolved_model = candidate
+                    return candidate
+            for candidate in available:
+                if candidate not in exclude:
+                    self._resolved_model = candidate
+                    return candidate
+
+        fallback = configured if configured.lower() not in {"", "auto", "default"} else "gemini-2.5-flash"
+        self._resolved_model = fallback
+        return fallback
+
+    @staticmethod
+    def _is_model_not_found(exc: Exception) -> bool:
+        return classify_gemini_error(exc).code == "model_not_found"
+
+    def _generate_content_with_fallback(self, client, *, contents, config):
+        first_model = self._resolve_model(client)
+        try:
+            return client.models.generate_content(model=first_model, contents=contents, config=config)
+        except Exception as exc:
+            if not self._is_model_not_found(exc):
+                raise
+            # Model cấu hình không dùng được với API key hiện tại: lấy lại danh sách model
+            # từ chính API key và thử một model generateContent khác đúng một lần.
+            self._resolved_model = None
+            second_model = self._resolve_model(client, refresh=True, exclude={first_model})
+            if not second_model or second_model == first_model:
+                raise
+            return client.models.generate_content(model=second_model, contents=contents, config=config)
 
     @staticmethod
     def _content_text(content) -> str:
@@ -768,8 +862,8 @@ class GeminiProjectAssistant(OpenAIProjectAssistant):
                 system_instruction="\n\n".join(system_parts) or SYSTEM_INSTRUCTIONS,
                 tools=tools,
             )
-            response = client.models.generate_content(
-                model=self.model, contents=contents, config=cfg
+            response = self._generate_content_with_fallback(
+                client, contents=contents, config=cfg
             )
             text = getattr(response, "text", "") or ""
             return text.strip() or "AI không trả về nội dung văn bản."
@@ -809,8 +903,8 @@ Yêu cầu bổ sung của người dùng: {instruction or 'Không có'}
 
 Bối cảnh dự án rút gọn:
 {snapshot}"""
-            response = client.models.generate_content(
-                model=self.model,
+            response = self._generate_content_with_fallback(
+                client,
                 contents=[prompt, uploaded],
                 config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTIONS),
             )
@@ -843,7 +937,7 @@ Bối cảnh dự án rút gọn:
         ], use_web=False)
         return (
             "✅ GEMINI API HOẠT ĐỘNG\n"
-            f"Model: {self.model}\n"
-            "API key, quota cơ bản và quyền dùng model đã vượt qua phép kiểm tra."
+            f"Model đang dùng: {self.model}\n"
+            "Ứng dụng đã kiểm tra API key và tự chọn model generateContent khả dụng."
         )
 

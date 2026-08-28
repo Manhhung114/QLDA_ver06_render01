@@ -2279,7 +2279,7 @@ def _runtime_app_settings() -> dict:
     openai_key = (_streamlit_secret("OPENAI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "") or st.session_state.get("cfg_openai_api_key", "")).strip()
     openai_model = (_streamlit_secret("OPENAI_MODEL", "") or os.environ.get("OPENAI_MODEL", "") or st.session_state.get("cfg_openai_model", "gpt-5-mini") or "gpt-5-mini").strip()
     gemini_key = (_streamlit_secret("GEMINI_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "") or st.session_state.get("cfg_gemini_api_key", "")).strip()
-    gemini_model = (_streamlit_secret("GEMINI_MODEL", "") or os.environ.get("GEMINI_MODEL", "") or st.session_state.get("cfg_gemini_model", "gemini-2.5-flash") or "gemini-2.5-flash").strip()
+    gemini_model = (_streamlit_secret("GEMINI_MODEL", "") or os.environ.get("GEMINI_MODEL", "") or st.session_state.get("cfg_gemini_model", "auto") or "auto").strip()
     if "cfg_ai_web_search" not in st.session_state:
         env_web = _streamlit_secret("AI_WEB_SEARCH", "") or os.environ.get("AI_WEB_SEARCH", "") or os.environ.get("OPENAI_WEB_SEARCH", "") or os.environ.get("GEMINI_WEB_SEARCH", "")
         st.session_state["cfg_ai_web_search"] = str(env_web or "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -2298,7 +2298,7 @@ def _runtime_app_settings() -> dict:
         "ai_web_search": bool(st.session_state.get("cfg_ai_web_search", False)),
         "openai_api_key": openai_key, "openai_model": openai_model or "gpt-5-mini",
         "openai_web_search": bool(st.session_state.get("cfg_ai_web_search", False)),
-        "gemini_api_key": gemini_key, "gemini_model": gemini_model or "gemini-2.5-flash",
+        "gemini_api_key": gemini_key, "gemini_model": gemini_model or "auto",
         "specified_search_domains": domains or list(DEFAULT_SPECIFIED_SEARCH_DOMAINS),
     }
 
@@ -2337,10 +2337,10 @@ def render_settings():
                 st.success("GEMINI_API_KEY đã được cấu hình bằng Secrets/biến môi trường.")
             else:
                 st.text_input("Gemini API key", type="password", key="cfg_gemini_api_key")
-            default_gemini_model = _streamlit_secret("GEMINI_MODEL", "") or os.environ.get("GEMINI_MODEL", "") or st.session_state.get("cfg_gemini_model", "gemini-2.5-flash")
+            default_gemini_model = _streamlit_secret("GEMINI_MODEL", "") or os.environ.get("GEMINI_MODEL", "") or st.session_state.get("cfg_gemini_model", "auto")
             if "cfg_gemini_model" not in st.session_state:
-                st.session_state["cfg_gemini_model"] = default_gemini_model or "gemini-2.5-flash"
-            st.text_input("Gemini model", key="cfg_gemini_model")
+                st.session_state["cfg_gemini_model"] = default_gemini_model or "auto"
+            st.text_input("Gemini model (khuyên dùng: auto)", key="cfg_gemini_model")
 
         st.checkbox("Cho phép tìm kiếm web khi AI tra cứu pháp lý", key="cfg_ai_web_search")
         test_label = "🩺 Kiểm tra Gemini API" if active_provider == "gemini" else "🩺 Kiểm tra OpenAI API"
@@ -2350,7 +2350,7 @@ def render_settings():
                 if cfg_now.get("ai_provider") == "gemini":
                     test_ai = GeminiProjectAssistant(DB_PATH, GeminiSettings(
                         api_key=(cfg_now.get("gemini_api_key") or "").strip(),
-                        model=(cfg_now.get("gemini_model") or "gemini-2.5-flash").strip(),
+                        model=(cfg_now.get("gemini_model") or "auto").strip(),
                         use_web=False,
                     ))
                 else:
@@ -2501,7 +2501,7 @@ def render_ai_assistant(pid: int):
     if provider == "gemini":
         settings = GeminiSettings(
             api_key=(appcfg.get("gemini_api_key") or "").strip(),
-            model=(appcfg.get("gemini_model") or "gemini-2.5-flash").strip(),
+            model=(appcfg.get("gemini_model") or "auto").strip(),
             use_web=bool(appcfg.get("ai_web_search", False)),
         )
         ai = GeminiProjectAssistant(DB_PATH, settings)
