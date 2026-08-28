@@ -1658,6 +1658,202 @@ def render_site_diary(pid: int):
         _render_selected_document_downloads(pid, doc_type, download_ids, state_key)
 
 
+
+def _task_ref_value(task) -> str:
+    if not task:
+        return ""
+    task_id = task["source_task_id"] or task["id"]
+    return f"[TASK:{task_id}/{task['wbs'] or ''}]"
+
+
+def _task_option_data(pid: int):
+    tasks = [t for t in db.tasks(pid) if not int(t["is_summary"] or 0)]
+    refs = [_task_ref_value(t) for t in tasks]
+    labels = {ref: f"{ref} {next((x['name'] for x in tasks if _task_ref_value(x)==ref), '')}" for ref in refs}
+    mapping = {ref: t for ref, t in zip(refs, tasks)}
+    return refs, labels, mapping
+
+
+def _select_existing(label: str, values: list[str], current: str, key: str):
+    opts = [""] + list(dict.fromkeys([x for x in values if x]))
+    if current and current not in opts:
+        opts.append(current)
+    idx = opts.index(current) if current in opts else 0
+    return st.selectbox(label, opts, index=idx, key=key, format_func=lambda x: "— Không liên kết —" if not x else x)
+
+
+def _vnd(v) -> str:
+    try: return f"{float(v or 0):,.0f}"
+    except Exception: return "0"
+
+
+def _parse_date_safe(v: str):
+    try: return datetime.strptime(str(v or ""), "%Y-%m-%d").date()
+    except Exception: return None
+
+
+def _filter_text_rows(rows, fields, keyword):
+    q = (keyword or "").strip().lower()
+    if not q: return list(rows)
+    out=[]
+    for r in rows:
+        hay=" ".join(str(r[f] or "") for f in fields if f in r.keys()).lower()
+        if q in hay: out.append(r)
+    return out
+
+
+def render_cost_management(pid: int):
+    st.subheader("💰 Quản lý chi phí")
+    tab1, tab2, tab3 = st.tabs(["Chi phí dự toán (BOQ)", "Thanh toán & giải ngân", "Chi phí phát sinh (VO)"])
+    task_refs, task_labels, task_map = _task_option_data(pid)
+
+    with tab1:
+        rows = db.cost_budgets(pid)
+        total_bac = sum(float(r["budget_total"] or 0) for r in rows)
+        st.metric("Tổng ngân sách kế hoạch (BAC)", f"{_vnd(total_bac)} VND")
+        options=[None]+[int(r["id"]) for r in rows]
+        selected=st.selectbox("Chọn dòng BOQ để sửa", options, format_func=lambda x:"➕ Thêm mới" if x is None else f"#{x} - {next(r['boq_item'] for r in rows if r['id']==x)}", key=f"cost_boq_sel_{pid}")
+        rec=db.cost_budget(selected) if selected else None
+        with st.form(f"cost_boq_form_{pid}_{selected or 'new'}"):
+            task_ref=_select_existing("Mã Task", task_refs, rec["task_ref"] if rec else "", f"cost_boq_task_{pid}_{selected}")
+            item=st.text_input("Hạng mục / Khối lượng (BOQ) *", value=rec["boq_item"] if rec else "")
+            c1,c2,c3=st.columns(3)
+            qty=c1.number_input("Khối lượng", min_value=0.0, value=float(rec["quantity"] or 0) if rec else 0.0, step=1.0)
+            unit=c2.text_input("Đơn vị tính", value=rec["unit"] if rec else "")
+            price=c3.number_input("Đơn giá dự toán (VND)", min_value=0.0, value=float(rec["unit_price"] or 0) if rec else 0.0, step=1000.0)
+            total=qty*price
+            st.number_input("Tổng ngân sách kế hoạch (VND)", min_value=0.0, value=float(total), disabled=True)
+            c1,c2=st.columns(2)
+            contract=c1.selectbox("Hình thức hợp đồng", ["Trọn gói","Đơn giá điều chỉnh","Đơn giá cố định","Khác"], index=(["Trọn gói","Đơn giá điều chỉnh","Đơn giá cố định","Khác"].index(rec["contract_type"]) if rec and rec["contract_type"] in ["Trọn gói","Đơn giá điều chỉnh","Đơn giá cố định","Khác"] else 0))
+            contractor=c2.text_input("Nhà thầu phụ trách", value=rec["contractor"] if rec else "")
+            note=st.text_area("Ghi chú", value=rec["note"] if rec else "")
+            save=st.form_submit_button("💾 Lưu BOQ", type="primary", disabled=not _can_update(), width="stretch")
+        if save:
+            if not item.strip(): st.error("Hạng mục BOQ là bắt buộc.")
+            else:
+                rid=db.save_cost_budget(pid,{"task_ref":task_ref,"boq_item":item,"quantity":qty,"unit":unit,"unit_price":price,"budget_total":total,"contract_type":contract,"contractor":contractor,"note":note},selected)
+                st.success("Đã lưu chi phí dự toán."); st.rerun()
+        if selected and st.button("🗑 Xóa dòng BOQ", disabled=not _is_admin(), key=f"del_boq_{pid}_{selected}"):
+            db.delete_cost_budget(selected); st.rerun()
+        q=st.text_input("Tìm BOQ / Task / Nhà thầu", key=f"filter_boq_{pid}")
+        filt=_filter_text_rows(rows,["task_ref","boq_item","unit","contract_type","contractor","note"],q)
+        if filt:
+            st.dataframe(pd.DataFrame([{"ID":r["id"],"Mã Task":r["task_ref"],"Hạng mục / BOQ":r["boq_item"],"Khối lượng":r["quantity"],"ĐVT":r["unit"],"Đơn giá":r["unit_price"],"BAC (VND)":r["budget_total"],"Hợp đồng":r["contract_type"],"Nhà thầu":r["contractor"],"Ghi chú":r["note"]} for r in filt]), hide_index=True, width="stretch")
+
+    with tab2:
+        rows=db.payments(pid); budgets=db.cost_budgets(pid)
+        budget_by_task={}
+        for b in budgets: budget_by_task[b["task_ref"]]=budget_by_task.get(b["task_ref"],0)+float(b["budget_total"] or 0)
+        total_paid=sum(float(r["paid_amount"] or 0) for r in rows)
+        c1,c2,c3=st.columns(3); c1.metric("Đã thanh toán",f"{_vnd(total_paid)} VND"); c2.metric("BAC",f"{_vnd(sum(budget_by_task.values()))} VND"); c3.metric("Giải ngân/BAC",f"{(100*total_paid/sum(budget_by_task.values()) if sum(budget_by_task.values()) else 0):.1f}%")
+        options=[None]+[int(r["id"]) for r in rows]; selected=st.selectbox("Chọn thanh toán để sửa",options,format_func=lambda x:"➕ Thêm mới" if x is None else f"#{x} - {next(r['payment_code'] for r in rows if r['id']==x)}",key=f"pay_sel_{pid}"); rec=db.payment(selected) if selected else None
+        with st.form(f"pay_form_{pid}_{selected or 'new'}"):
+            c1,c2=st.columns(2); code=c1.text_input("Mã Thanh Toán *",value=rec["payment_code"] if rec else ""); installment=c2.text_input("Đợt thanh toán",value=rec["installment"] if rec else "")
+            task_ref=_select_existing("Mã Task",task_refs,rec["task_ref"] if rec else "",f"pay_task_{pid}_{selected}")
+            c1,c2=st.columns(2); certified=c1.number_input("Giá trị nghiệm thu lũy kế (VND)",min_value=0.0,value=float(rec["certified_cumulative"] or 0) if rec else 0.0,step=1000000.0); paid=c2.number_input("Giá trị đã thanh toán (VND)",min_value=0.0,value=float(rec["paid_amount"] or 0) if rec else 0.0,step=1000000.0)
+            c1,c2=st.columns(2); advance=c1.number_input("Giá trị tạm ứng (VND)",min_value=0.0,value=float(rec["advance_amount"] or 0) if rec else 0.0,step=1000000.0); recovery=c2.number_input("Thu hồi tạm ứng (VND)",min_value=0.0,value=float(rec["advance_recovery"] or 0) if rec else 0.0,step=1000000.0)
+            c1,c2,c3=st.columns(3); planned_pct=c1.number_input("Giải ngân kế hoạch (%)",min_value=0.0,max_value=100.0,value=float(rec["planned_disbursement_pct"] or 0) if rec else 0.0); status=c2.selectbox("Trạng thái hồ sơ",["Chuẩn bị","Đã trình","Đang kiểm tra","Đã duyệt","Đã thanh toán","Từ chối"],index=0 if not rec or rec["payment_status"] not in ["Chuẩn bị","Đã trình","Đang kiểm tra","Đã duyệt","Đã thanh toán","Từ chối"] else ["Chuẩn bị","Đã trình","Đang kiểm tra","Đã duyệt","Đã thanh toán","Từ chối"].index(rec["payment_status"])); pdate=c3.date_input("Ngày thanh toán",value=_parse_date_safe(rec["payment_date"]) if rec and rec["payment_date"] else date.today())
+            bac=budget_by_task.get(task_ref,0); actual_pct=100*paid/bac if bac else 0; st.text_input("Giải ngân thực tế vs kế hoạch",value=f"{actual_pct:.1f}% / {planned_pct:.1f}%",disabled=True)
+            note=st.text_area("Ghi chú",value=rec["note"] if rec else ""); save=st.form_submit_button("💾 Lưu thanh toán",type="primary",disabled=not _can_update(),width="stretch")
+        if save:
+            if not code.strip(): st.error("Mã Thanh Toán là bắt buộc.")
+            else:
+                try: db.save_payment(pid,{"payment_code":code.strip(),"task_ref":task_ref,"installment":installment,"certified_cumulative":certified,"paid_amount":paid,"advance_amount":advance,"advance_recovery":recovery,"planned_disbursement_pct":planned_pct,"payment_status":status,"payment_date":iso(pdate),"note":note},selected); st.success("Đã lưu thanh toán."); st.rerun()
+                except sqlite3.IntegrityError: st.error("Mã Thanh Toán đã tồn tại.")
+        if selected and st.button("🗑 Xóa thanh toán",disabled=not _is_admin(),key=f"del_pay_{pid}_{selected}"): db.delete_payment(selected); st.rerun()
+        q=st.text_input("Tìm mã thanh toán / Task / trạng thái",key=f"filter_pay_{pid}"); filt=_filter_text_rows(rows,["payment_code","task_ref","installment","payment_status","note"],q)
+        data=[]
+        for r in filt:
+            bac=budget_by_task.get(r["task_ref"],0); act=100*float(r["paid_amount"] or 0)/bac if bac else 0
+            data.append({"ID":r["id"],"Mã thanh toán":r["payment_code"],"Mã Task":r["task_ref"],"Đợt":r["installment"],"Nghiệm thu LK":r["certified_cumulative"],"Đã thanh toán":r["paid_amount"],"Tạm ứng":r["advance_amount"],"Thu hồi TU":r["advance_recovery"],"Giải ngân TT/KH":f"{act:.1f}% / {float(r['planned_disbursement_pct'] or 0):.1f}%","Trạng thái":r["payment_status"],"Ngày":r["payment_date"]})
+        if data: st.dataframe(pd.DataFrame(data),hide_index=True,width="stretch")
+
+    with tab3:
+        rows=db.cost_variations(pid); c1,c2=st.columns(2); c1.metric("Phát sinh trình duyệt",f"{_vnd(sum(float(r['proposed_amount'] or 0) for r in rows))} VND"); c2.metric("Phát sinh đã duyệt",f"{_vnd(sum(float(r['approved_amount'] or 0) for r in rows))} VND")
+        options=[None]+[int(r["id"]) for r in rows]; selected=st.selectbox("Chọn VO để sửa",options,format_func=lambda x:"➕ Thêm mới" if x is None else f"#{x} - {next(r['vo_code'] for r in rows if r['id']==x)}",key=f"vo_cost_sel_{pid}"); rec=db.cost_variation(selected) if selected else None
+        with st.form(f"vo_cost_form_{pid}_{selected or 'new'}"):
+            c1,c2=st.columns(2); code=c1.text_input("Mã VO *",value=rec["vo_code"] if rec else ""); vdate=c2.date_input("Ngày phát sinh",value=_parse_date_safe(rec["vo_date"]) if rec and rec["vo_date"] else date.today())
+            task_ref=_select_existing("Mã Task liên quan",task_refs,rec["task_ref"] if rec else "",f"vo_task_{pid}_{selected}")
+            desc=st.text_area("Nội dung điều chỉnh / Phát sinh *",value=rec["description"] if rec else "")
+            c1,c2=st.columns(2); proposed=c1.number_input("Dự toán phát sinh trình duyệt (VND)",min_value=0.0,value=float(rec["proposed_amount"] or 0) if rec else 0.0,step=1000000.0); approved=c2.number_input("Giá trị duyệt chính thức (VND)",min_value=0.0,value=float(rec["approved_amount"] or 0) if rec else 0.0,step=1000000.0)
+            c1,c2=st.columns(2); funding=c1.selectbox("Nguồn kinh phí",["Dự phòng phí","CĐT bổ sung","Điều chuyển ngân sách","Khác"],index=0 if not rec or rec["funding_source"] not in ["Dự phòng phí","CĐT bổ sung","Điều chuyển ngân sách","Khác"] else ["Dự phòng phí","CĐT bổ sung","Điều chuyển ngân sách","Khác"].index(rec["funding_source"])); status=c2.selectbox("Trạng thái",["Dự thảo","Đã trình","Đang duyệt","Đã duyệt","Từ chối","Đóng"],index=0 if not rec or rec["status"] not in ["Dự thảo","Đã trình","Đang duyệt","Đã duyệt","Từ chối","Đóng"] else ["Dự thảo","Đã trình","Đang duyệt","Đã duyệt","Từ chối","Đóng"].index(rec["status"]))
+            note=st.text_area("Ghi chú",value=rec["note"] if rec else ""); save=st.form_submit_button("💾 Lưu VO",type="primary",disabled=not _can_update(),width="stretch")
+        if save:
+            if not code.strip() or not desc.strip(): st.error("Mã VO và nội dung phát sinh là bắt buộc.")
+            else:
+                try: db.save_cost_variation(pid,{"vo_code":code.strip(),"task_ref":task_ref,"description":desc,"proposed_amount":proposed,"approved_amount":approved,"funding_source":funding,"status":status,"vo_date":iso(vdate),"note":note},selected); st.success("Đã lưu chi phí phát sinh."); st.rerun()
+                except sqlite3.IntegrityError: st.error("Mã VO đã tồn tại.")
+        if selected and st.button("🗑 Xóa VO",disabled=not _is_admin(),key=f"del_vo_cost_{pid}_{selected}"): db.delete_cost_variation(selected); st.rerun()
+        q=st.text_input("Tìm VO / Task / nội dung",key=f"filter_vo_cost_{pid}"); filt=_filter_text_rows(rows,["vo_code","task_ref","description","funding_source","status","note"],q)
+        if filt: st.dataframe(pd.DataFrame([{"ID":r["id"],"Mã VO":r["vo_code"],"Mã Task":r["task_ref"],"Nội dung":r["description"],"Trình duyệt":r["proposed_amount"],"Đã duyệt":r["approved_amount"],"Nguồn kinh phí":r["funding_source"],"Trạng thái":r["status"],"Ngày":r["vo_date"]} for r in filt]),hide_index=True,width="stretch")
+
+
+def render_material_management(pid: int):
+    st.subheader("📦 Vật tư & thiết bị")
+    tab1,tab2,tab3=st.tabs(["Danh mục vật tư/thiết bị","Tiến độ mua sắm & cung ứng","Nhập - Xuất - Tồn & Kiểm định"])
+    task_refs, task_labels, task_map=_task_option_data(pid)
+
+    with tab1:
+        rows=db.materials(pid); c1,c2,c3=st.columns(3); c1.metric("Tổng chủng loại",len(rows)); c2.metric("CĐT cung cấp",sum(1 for r in rows if r["supply_type"]=="CĐT cung cấp")); c3.metric("Nhà thầu cung cấp",sum(1 for r in rows if r["supply_type"]=="Nhà thầu cung cấp"))
+        options=[None]+[int(r["id"]) for r in rows]; selected=st.selectbox("Chọn vật tư để sửa",options,format_func=lambda x:"➕ Thêm mới" if x is None else f"#{x} - {next(r['material_code'] for r in rows if r['id']==x)}",key=f"mat_sel_{pid}"); rec=db.material(selected) if selected else None
+        with st.form(f"mat_form_{pid}_{selected or 'new'}"):
+            c1,c2=st.columns(2); code=c1.text_input("Mã Vật tư *",value=rec["material_code"] if rec else ""); name=c2.text_input("Tên vật tư/thiết bị *",value=rec["material_name"] if rec else "")
+            spec=st.text_input("Quy cách / Thương hiệu",value=rec["spec_brand"] if rec else "")
+            legal=st.text_input("Mã Tiêu chuẩn/Quy chuẩn",value=rec["legal_ref"] if rec else "",placeholder="[LEGAL:TCVN 9206:2012]")
+            c1,c2=st.columns(2); supply=c1.selectbox("Phân loại cung cấp",["CĐT cung cấp","Nhà thầu cung cấp","Khác"],index=0 if not rec or rec["supply_type"] not in ["CĐT cung cấp","Nhà thầu cung cấp","Khác"] else ["CĐT cung cấp","Nhà thầu cung cấp","Khác"].index(rec["supply_type"])); task_ref=_select_existing("Mã Task sử dụng",task_refs,rec["task_ref"] if rec else "",f"mat_task_{pid}_{selected}")
+            note=st.text_area("Ghi chú",value=rec["note"] if rec else ""); save=st.form_submit_button("💾 Lưu vật tư",type="primary",disabled=not _can_update(),width="stretch")
+        if save:
+            if not code.strip() or not name.strip(): st.error("Mã và tên vật tư là bắt buộc.")
+            else:
+                try: db.save_material(pid,{"material_code":code.strip(),"material_name":name,"spec_brand":spec,"legal_ref":legal,"supply_type":supply,"task_ref":task_ref,"note":note},selected); st.success("Đã lưu danh mục vật tư."); st.rerun()
+                except sqlite3.IntegrityError: st.error("Mã vật tư đã tồn tại.")
+        if selected and st.button("🗑 Xóa vật tư",disabled=not _is_admin(),key=f"del_mat_{pid}_{selected}"): db.delete_material(selected); st.rerun()
+        q=st.text_input("Tìm mã / tên / thương hiệu / tiêu chuẩn / Task",key=f"filter_mat_{pid}"); c=st.selectbox("Nguồn cung",["Tất cả","CĐT cung cấp","Nhà thầu cung cấp","Khác"],key=f"filter_supply_{pid}"); filt=_filter_text_rows(rows,["material_code","material_name","spec_brand","legal_ref","task_ref","note"],q); filt=[r for r in filt if c=="Tất cả" or r["supply_type"]==c]
+        if filt: st.dataframe(pd.DataFrame([{"ID":r["id"],"Mã vật tư":r["material_code"],"Tên":r["material_name"],"Quy cách/Thương hiệu":r["spec_brand"],"Tiêu chuẩn/QCVN":r["legal_ref"],"Nguồn cung":r["supply_type"],"Mã Task":r["task_ref"],"Ghi chú":r["note"]} for r in filt]),hide_index=True,width="stretch")
+
+    with tab2:
+        rows=db.procurements(pid); materials=db.materials(pid); mat_codes=[r["material_code"] for r in materials]
+        def warning_for(r):
+            t=task_map.get(r["task_ref"]); task_start=_parse_date_safe(t["start_date"]) if t else None; actual=_parse_date_safe(r["actual_delivery_date"]); planned=_parse_date_safe(r["planned_delivery_date"]); delivery=actual or planned
+            if task_start and delivery and delivery>task_start: return f"⚠ Trễ { (delivery-task_start).days } ngày so với khởi công"
+            if planned and not actual and date.today()>planned: return f"⚠ Quá hạn giao { (date.today()-planned).days } ngày"
+            return "✅ Đúng/Trước mốc" if delivery and task_start else "—"
+        late=sum(1 for r in rows if warning_for(r).startswith("⚠")); c1,c2=st.columns(2); c1.metric("Kế hoạch mua sắm",len(rows)); c2.metric("Cảnh báo trễ",late)
+        options=[None]+[int(r["id"]) for r in rows]; selected=st.selectbox("Chọn kế hoạch mua sắm để sửa",options,format_func=lambda x:"➕ Thêm mới" if x is None else f"#{x} - {next(r['material_code'] for r in rows if r['id']==x)}",key=f"proc_sel_{pid}"); rec=db.procurement(selected) if selected else None
+        with st.form(f"proc_form_{pid}_{selected or 'new'}"):
+            mat=_select_existing("Mã Vật tư *",mat_codes,rec["material_code"] if rec else "",f"proc_mat_{pid}_{selected}"); task_ref=_select_existing("Mã Task lắp đặt",task_refs,rec["task_ref"] if rec else "",f"proc_task_{pid}_{selected}"); supplier=st.text_input("Nhà cung cấp / Nhà sản xuất",value=rec["supplier"] if rec else "")
+            c1,c2=st.columns(2); sample=c1.date_input("Ngày phê duyệt mẫu/Spec",value=_parse_date_safe(rec["sample_approval_date"]) if rec and rec["sample_approval_date"] else date.today()); order=c2.date_input("Ngày đặt hàng",value=_parse_date_safe(rec["order_date"]) if rec and rec["order_date"] else date.today())
+            c1,c2=st.columns(2); planned=c1.date_input("Ngày giao hàng kế hoạch",value=_parse_date_safe(rec["planned_delivery_date"]) if rec and rec["planned_delivery_date"] else date.today()); has_actual=c2.checkbox("Đã về công trường",value=bool(rec and rec["actual_delivery_date"])); actual=c2.date_input("Ngày về thực tế",value=_parse_date_safe(rec["actual_delivery_date"]) if rec and rec["actual_delivery_date"] else date.today(),disabled=not has_actual)
+            status=st.selectbox("Trạng thái",["Chờ duyệt mẫu","Đã duyệt mẫu","Đã đặt hàng","Đang sản xuất","Đang vận chuyển","Đã về công trường","Chậm","Hủy"],index=0 if not rec or rec["status"] not in ["Chờ duyệt mẫu","Đã duyệt mẫu","Đã đặt hàng","Đang sản xuất","Đang vận chuyển","Đã về công trường","Chậm","Hủy"] else ["Chờ duyệt mẫu","Đã duyệt mẫu","Đã đặt hàng","Đang sản xuất","Đang vận chuyển","Đã về công trường","Chậm","Hủy"].index(rec["status"])); note=st.text_area("Ghi chú",value=rec["note"] if rec else ""); save=st.form_submit_button("💾 Lưu tiến độ mua sắm",type="primary",disabled=not _can_update(),width="stretch")
+        if save:
+            if not mat: st.error("Mã vật tư là bắt buộc.")
+            else: db.save_procurement(pid,{"material_code":mat,"task_ref":task_ref,"supplier":supplier,"sample_approval_date":iso(sample),"order_date":iso(order),"planned_delivery_date":iso(planned),"actual_delivery_date":iso(actual) if has_actual else "","status":status,"note":note},selected); st.success("Đã lưu tiến độ mua sắm."); st.rerun()
+        if selected and st.button("🗑 Xóa kế hoạch mua sắm",disabled=not _is_admin(),key=f"del_proc_{pid}_{selected}"): db.delete_procurement(selected); st.rerun()
+        q=st.text_input("Tìm vật tư / Task / nhà cung cấp",key=f"filter_proc_{pid}"); warn_filter=st.selectbox("Cảnh báo",["Tất cả","Có cảnh báo trễ","Không cảnh báo"],key=f"filter_proc_warn_{pid}"); filt=_filter_text_rows(rows,["material_code","task_ref","supplier","status","note"],q); filt=[r for r in filt if warn_filter=="Tất cả" or (warn_filter=="Có cảnh báo trễ" and warning_for(r).startswith("⚠")) or (warn_filter=="Không cảnh báo" and not warning_for(r).startswith("⚠"))]
+        if filt: st.dataframe(pd.DataFrame([{"ID":r["id"],"Mã vật tư":r["material_code"],"Mã Task":r["task_ref"],"Nhà cung cấp":r["supplier"],"Duyệt mẫu":r["sample_approval_date"],"Đặt hàng":r["order_date"],"Giao KH":r["planned_delivery_date"],"Về thực tế":r["actual_delivery_date"],"Trạng thái":r["status"],"Cảnh báo":warning_for(r)} for r in filt]),hide_index=True,width="stretch")
+
+    with tab3:
+        rows=db.inventory_rows(pid); materials=db.materials(pid); mat_codes=[r["material_code"] for r in materials]
+        stock={}
+        for r in rows: stock[r["material_code"]]=stock.get(r["material_code"],0)+float(r["quantity_in"] or 0)-float(r["quantity_out"] or 0)
+        c1,c2,c3=st.columns(3); c1.metric("Số phiếu",len(rows)); c2.metric("Vật tư tồn > 0",sum(1 for v in stock.values() if v>0)); c3.metric("Không đạt",sum(1 for r in rows if r["material_status"]=="Không đạt"))
+        options=[None]+[int(r["id"]) for r in rows]; selected=st.selectbox("Chọn phiếu để sửa",options,format_func=lambda x:"➕ Thêm mới" if x is None else f"#{x} - {next(r['slip_code'] for r in rows if r['id']==x)}",key=f"inv_sel_{pid}"); rec=db.inventory_row(selected) if selected else None
+        with st.form(f"inv_form_{pid}_{selected or 'new'}"):
+            c1,c2=st.columns(2); slip=c1.text_input("Mã Phiếu Nhập/Xuất *",value=rec["slip_code"] if rec else ""); tdate=c2.date_input("Ngày",value=_parse_date_safe(rec["transaction_date"]) if rec and rec["transaction_date"] else date.today())
+            mat=_select_existing("Mã Vật tư *",mat_codes,rec["material_code"] if rec else "",f"inv_mat_{pid}_{selected}")
+            c1,c2=st.columns(2); qin=c1.number_input("Số lượng nhập",min_value=0.0,value=float(rec["quantity_in"] or 0) if rec else 0.0); qout=c2.number_input("Số lượng xuất",min_value=0.0,value=float(rec["quantity_out"] or 0) if rec else 0.0)
+            task_ref=_select_existing("Số lượng xuất cho Task",task_refs,rec["task_ref"] if rec else "",f"inv_task_{pid}_{selected}"); insp=st.text_input("Mã Biên bản kiểm tra chất lượng (RFA/Biên bản đầu vào)",value=rec["inspection_code"] if rec else "")
+            status=st.selectbox("Trạng thái vật tư",["Chờ kiểm định","Đã nghiệm thu Đạt","Không đạt"],index=0 if not rec or rec["material_status"] not in ["Chờ kiểm định","Đã nghiệm thu Đạt","Không đạt"] else ["Chờ kiểm định","Đã nghiệm thu Đạt","Không đạt"].index(rec["material_status"])); note=st.text_area("Ghi chú",value=rec["note"] if rec else ""); save=st.form_submit_button("💾 Lưu phiếu",type="primary",disabled=not _can_update(),width="stretch")
+        if save:
+            if not slip.strip() or not mat: st.error("Mã phiếu và mã vật tư là bắt buộc.")
+            else:
+                try: db.save_inventory_row(pid,{"slip_code":slip.strip(),"transaction_date":iso(tdate),"material_code":mat,"quantity_in":qin,"quantity_out":qout,"task_ref":task_ref,"inspection_code":insp,"material_status":status,"note":note},selected); st.success("Đã lưu nhập/xuất/kiểm định."); st.rerun()
+                except sqlite3.IntegrityError: st.error("Mã phiếu đã tồn tại.")
+        if selected and st.button("🗑 Xóa phiếu",disabled=not _is_admin(),key=f"del_inv_{pid}_{selected}"): db.delete_inventory_row(selected); st.rerun()
+        q=st.text_input("Tìm phiếu / vật tư / Task / biên bản",key=f"filter_inv_{pid}"); sf=st.selectbox("Trạng thái",["Tất cả","Chờ kiểm định","Đã nghiệm thu Đạt","Không đạt"],key=f"filter_inv_status_{pid}"); filt=_filter_text_rows(rows,["slip_code","material_code","task_ref","inspection_code","material_status","note"],q); filt=[r for r in filt if sf=="Tất cả" or r["material_status"]==sf]
+        if filt: st.dataframe(pd.DataFrame([{"ID":r["id"],"Mã phiếu":r["slip_code"],"Ngày":r["transaction_date"],"Mã vật tư":r["material_code"],"Nhập":r["quantity_in"],"Xuất":r["quantity_out"],"Tồn hiện tại":stock.get(r["material_code"],0),"Mã Task":r["task_ref"],"Biên bản kiểm tra":r["inspection_code"],"Trạng thái":r["material_status"]} for r in filt]),hide_index=True,width="stretch")
+
+
 def render_reports(pid: int):
     st.subheader("📊 Báo cáo trực quan")
     project = db.project(pid)
@@ -2664,7 +2860,7 @@ _email = _streamlit_user_email()
 _role_label = {"read":"Chỉ đọc","update":"Cập nhật","admin":"Admin","unknown":"Chưa xác định"}.get(_role, _role)
 st.info(f"Quyền hiện tại: **{_role_label}**" + (f" • {_email}" if _email else ""))
 
-main_tabs = st.tabs(["📅 Quản lý tiến độ", "📁 Quản lý hồ sơ", "📐 Quản lý bản vẽ", "📷 Nhật ký công trường", "📊 Báo cáo trực quan", "📚 Văn bản QLDA XD", "🤖 Trợ lý AI", "⚙️ Cài đặt", "🏗️ Dự án"])
+main_tabs = st.tabs(["📅 Quản lý tiến độ", "📁 Quản lý hồ sơ", "📐 Quản lý bản vẽ", "💰 Quản lý chi phí", "📦 Vật tư & thiết bị", "📷 Nhật ký công trường", "📊 Báo cáo trực quan", "📚 Văn bản QLDA XD", "🤖 Trợ lý AI", "⚙️ Cài đặt", "🏗️ Dự án"])
 with main_tabs[0]:
     render_schedule(pid)
 with main_tabs[1]:
@@ -2672,14 +2868,18 @@ with main_tabs[1]:
 with main_tabs[2]:
     render_drawings(pid)
 with main_tabs[3]:
-    render_site_diary(pid)
+    render_cost_management(pid)
 with main_tabs[4]:
-    render_reports(pid)
+    render_material_management(pid)
 with main_tabs[5]:
-    render_legal_documents()
+    render_site_diary(pid)
 with main_tabs[6]:
-    render_ai_assistant(pid)
+    render_reports(pid)
 with main_tabs[7]:
-    render_settings()
+    render_legal_documents()
 with main_tabs[8]:
+    render_ai_assistant(pid)
+with main_tabs[9]:
+    render_settings()
+with main_tabs[10]:
     render_project_info(pid)

@@ -234,9 +234,121 @@ class CloudDatabase:
                 FOREIGN KEY(drawing_id) REFERENCES drawings(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS cost_budgets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                task_ref TEXT DEFAULT '',
+                boq_item TEXT NOT NULL,
+                quantity REAL DEFAULT 0,
+                unit TEXT DEFAULT '',
+                unit_price REAL DEFAULT 0,
+                budget_total REAL DEFAULT 0,
+                contract_type TEXT DEFAULT '',
+                contractor TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                created_at TEXT DEFAULT '',
+                updated_at TEXT DEFAULT '',
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS payment_tracking (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                payment_code TEXT NOT NULL,
+                task_ref TEXT DEFAULT '',
+                installment TEXT DEFAULT '',
+                certified_cumulative REAL DEFAULT 0,
+                paid_amount REAL DEFAULT 0,
+                advance_amount REAL DEFAULT 0,
+                advance_recovery REAL DEFAULT 0,
+                planned_disbursement_pct REAL DEFAULT 0,
+                payment_status TEXT DEFAULT '',
+                payment_date TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                created_at TEXT DEFAULT '',
+                updated_at TEXT DEFAULT '',
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                UNIQUE(project_id, payment_code)
+            );
+
+            CREATE TABLE IF NOT EXISTS cost_variations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                vo_code TEXT NOT NULL,
+                task_ref TEXT DEFAULT '',
+                description TEXT NOT NULL,
+                proposed_amount REAL DEFAULT 0,
+                approved_amount REAL DEFAULT 0,
+                funding_source TEXT DEFAULT '',
+                status TEXT DEFAULT '',
+                vo_date TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                created_at TEXT DEFAULT '',
+                updated_at TEXT DEFAULT '',
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                UNIQUE(project_id, vo_code)
+            );
+
+            CREATE TABLE IF NOT EXISTS material_master (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                material_code TEXT NOT NULL,
+                material_name TEXT NOT NULL,
+                spec_brand TEXT DEFAULT '',
+                legal_ref TEXT DEFAULT '',
+                supply_type TEXT DEFAULT '',
+                task_ref TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                created_at TEXT DEFAULT '',
+                updated_at TEXT DEFAULT '',
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                UNIQUE(project_id, material_code)
+            );
+
+            CREATE TABLE IF NOT EXISTS procurement_schedule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                material_code TEXT NOT NULL,
+                task_ref TEXT DEFAULT '',
+                supplier TEXT DEFAULT '',
+                sample_approval_date TEXT DEFAULT '',
+                order_date TEXT DEFAULT '',
+                planned_delivery_date TEXT DEFAULT '',
+                actual_delivery_date TEXT DEFAULT '',
+                status TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                created_at TEXT DEFAULT '',
+                updated_at TEXT DEFAULT '',
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS inventory_inspection (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                slip_code TEXT NOT NULL,
+                transaction_date TEXT DEFAULT '',
+                material_code TEXT NOT NULL,
+                quantity_in REAL DEFAULT 0,
+                quantity_out REAL DEFAULT 0,
+                task_ref TEXT DEFAULT '',
+                inspection_code TEXT DEFAULT '',
+                material_status TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                created_at TEXT DEFAULT '',
+                updated_at TEXT DEFAULT '',
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                UNIQUE(project_id, slip_code)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
             CREATE INDEX IF NOT EXISTS idx_documents_project_type ON documents(project_id, doc_type);
             CREATE INDEX IF NOT EXISTS idx_drawings_project_type ON drawings(project_id, drawing_type);
+            CREATE INDEX IF NOT EXISTS idx_cost_budget_project ON cost_budgets(project_id);
+            CREATE INDEX IF NOT EXISTS idx_payment_project ON payment_tracking(project_id);
+            CREATE INDEX IF NOT EXISTS idx_variation_project ON cost_variations(project_id);
+            CREATE INDEX IF NOT EXISTS idx_material_project ON material_master(project_id);
+            CREATE INDEX IF NOT EXISTS idx_procurement_project ON procurement_schedule(project_id);
+            CREATE INDEX IF NOT EXISTS idx_inventory_project ON inventory_inspection(project_id);
             """)
 
     def _columns(self, c, table: str) -> set[str]:
@@ -556,6 +668,115 @@ class CloudDatabase:
         with self.connect() as c:
             c.execute("DELETE FROM drawing_attachments WHERE id=?", (attachment_id,))
             c.execute("UPDATE drawings SET file_updated_at=?,updated_at=? WHERE id=?", (_now(), _now(), drawing_id))
+
+    # ---------- Cost management ----------
+    def cost_budgets(self, project_id: int):
+        with self.connect() as c:
+            return c.execute("SELECT * FROM cost_budgets WHERE project_id=? ORDER BY id DESC", (project_id,)).fetchall()
+
+    def cost_budget(self, row_id: int):
+        with self.connect() as c:
+            return c.execute("SELECT * FROM cost_budgets WHERE id=?", (row_id,)).fetchone()
+
+    def save_cost_budget(self, project_id: int, data: dict, row_id: int | None = None) -> int:
+        fields = ["task_ref","boq_item","quantity","unit","unit_price","budget_total","contract_type","contractor","note"]
+        vals = [data.get(f, "") for f in fields]
+        with self.connect() as c:
+            if row_id:
+                c.execute(f"UPDATE cost_budgets SET {','.join(f'{f}=?' for f in fields)},updated_at=? WHERE id=?", vals + [_now(), row_id])
+                return row_id
+            cur = c.execute(f"INSERT INTO cost_budgets(project_id,{','.join(fields)},created_at,updated_at) VALUES(?,{','.join('?' for _ in fields)},?,?)", [project_id] + vals + [_now(), _now()])
+            return int(cur.lastrowid)
+
+    def delete_cost_budget(self, row_id: int):
+        with self.connect() as c: c.execute("DELETE FROM cost_budgets WHERE id=?", (row_id,))
+
+    def payments(self, project_id: int):
+        with self.connect() as c:
+            return c.execute("SELECT * FROM payment_tracking WHERE project_id=? ORDER BY payment_date DESC,id DESC", (project_id,)).fetchall()
+
+    def payment(self, row_id: int):
+        with self.connect() as c: return c.execute("SELECT * FROM payment_tracking WHERE id=?", (row_id,)).fetchone()
+
+    def save_payment(self, project_id: int, data: dict, row_id: int | None = None) -> int:
+        fields = ["payment_code","task_ref","installment","certified_cumulative","paid_amount","advance_amount","advance_recovery","planned_disbursement_pct","payment_status","payment_date","note"]
+        vals = [data.get(f, "") for f in fields]
+        with self.connect() as c:
+            if row_id:
+                c.execute(f"UPDATE payment_tracking SET {','.join(f'{f}=?' for f in fields)},updated_at=? WHERE id=?", vals + [_now(), row_id]); return row_id
+            cur = c.execute(f"INSERT INTO payment_tracking(project_id,{','.join(fields)},created_at,updated_at) VALUES(?,{','.join('?' for _ in fields)},?,?)", [project_id] + vals + [_now(), _now()]); return int(cur.lastrowid)
+
+    def delete_payment(self, row_id: int):
+        with self.connect() as c: c.execute("DELETE FROM payment_tracking WHERE id=?", (row_id,))
+
+    def cost_variations(self, project_id: int):
+        with self.connect() as c: return c.execute("SELECT * FROM cost_variations WHERE project_id=? ORDER BY vo_date DESC,id DESC", (project_id,)).fetchall()
+
+    def cost_variation(self, row_id: int):
+        with self.connect() as c: return c.execute("SELECT * FROM cost_variations WHERE id=?", (row_id,)).fetchone()
+
+    def save_cost_variation(self, project_id: int, data: dict, row_id: int | None = None) -> int:
+        fields = ["vo_code","task_ref","description","proposed_amount","approved_amount","funding_source","status","vo_date","note"]
+        vals = [data.get(f, "") for f in fields]
+        with self.connect() as c:
+            if row_id:
+                c.execute(f"UPDATE cost_variations SET {','.join(f'{f}=?' for f in fields)},updated_at=? WHERE id=?", vals + [_now(), row_id]); return row_id
+            cur = c.execute(f"INSERT INTO cost_variations(project_id,{','.join(fields)},created_at,updated_at) VALUES(?,{','.join('?' for _ in fields)},?,?)", [project_id] + vals + [_now(), _now()]); return int(cur.lastrowid)
+
+    def delete_cost_variation(self, row_id: int):
+        with self.connect() as c: c.execute("DELETE FROM cost_variations WHERE id=?", (row_id,))
+
+    # ---------- Material & equipment management ----------
+    def materials(self, project_id: int):
+        with self.connect() as c: return c.execute("SELECT * FROM material_master WHERE project_id=? ORDER BY material_code", (project_id,)).fetchall()
+
+    def material(self, row_id: int):
+        with self.connect() as c: return c.execute("SELECT * FROM material_master WHERE id=?", (row_id,)).fetchone()
+
+    def save_material(self, project_id: int, data: dict, row_id: int | None = None) -> int:
+        fields = ["material_code","material_name","spec_brand","legal_ref","supply_type","task_ref","note"]
+        vals = [data.get(f, "") for f in fields]
+        with self.connect() as c:
+            if row_id:
+                c.execute(f"UPDATE material_master SET {','.join(f'{f}=?' for f in fields)},updated_at=? WHERE id=?", vals + [_now(), row_id]); return row_id
+            cur = c.execute(f"INSERT INTO material_master(project_id,{','.join(fields)},created_at,updated_at) VALUES(?,{','.join('?' for _ in fields)},?,?)", [project_id] + vals + [_now(), _now()]); return int(cur.lastrowid)
+
+    def delete_material(self, row_id: int):
+        with self.connect() as c: c.execute("DELETE FROM material_master WHERE id=?", (row_id,))
+
+    def procurements(self, project_id: int):
+        with self.connect() as c: return c.execute("SELECT * FROM procurement_schedule WHERE project_id=? ORDER BY planned_delivery_date,id DESC", (project_id,)).fetchall()
+
+    def procurement(self, row_id: int):
+        with self.connect() as c: return c.execute("SELECT * FROM procurement_schedule WHERE id=?", (row_id,)).fetchone()
+
+    def save_procurement(self, project_id: int, data: dict, row_id: int | None = None) -> int:
+        fields = ["material_code","task_ref","supplier","sample_approval_date","order_date","planned_delivery_date","actual_delivery_date","status","note"]
+        vals = [data.get(f, "") for f in fields]
+        with self.connect() as c:
+            if row_id:
+                c.execute(f"UPDATE procurement_schedule SET {','.join(f'{f}=?' for f in fields)},updated_at=? WHERE id=?", vals + [_now(), row_id]); return row_id
+            cur = c.execute(f"INSERT INTO procurement_schedule(project_id,{','.join(fields)},created_at,updated_at) VALUES(?,{','.join('?' for _ in fields)},?,?)", [project_id] + vals + [_now(), _now()]); return int(cur.lastrowid)
+
+    def delete_procurement(self, row_id: int):
+        with self.connect() as c: c.execute("DELETE FROM procurement_schedule WHERE id=?", (row_id,))
+
+    def inventory_rows(self, project_id: int):
+        with self.connect() as c: return c.execute("SELECT * FROM inventory_inspection WHERE project_id=? ORDER BY transaction_date DESC,id DESC", (project_id,)).fetchall()
+
+    def inventory_row(self, row_id: int):
+        with self.connect() as c: return c.execute("SELECT * FROM inventory_inspection WHERE id=?", (row_id,)).fetchone()
+
+    def save_inventory_row(self, project_id: int, data: dict, row_id: int | None = None) -> int:
+        fields = ["slip_code","transaction_date","material_code","quantity_in","quantity_out","task_ref","inspection_code","material_status","note"]
+        vals = [data.get(f, "") for f in fields]
+        with self.connect() as c:
+            if row_id:
+                c.execute(f"UPDATE inventory_inspection SET {','.join(f'{f}=?' for f in fields)},updated_at=? WHERE id=?", vals + [_now(), row_id]); return row_id
+            cur = c.execute(f"INSERT INTO inventory_inspection(project_id,{','.join(fields)},created_at,updated_at) VALUES(?,{','.join('?' for _ in fields)},?,?)", [project_id] + vals + [_now(), _now()]); return int(cur.lastrowid)
+
+    def delete_inventory_row(self, row_id: int):
+        with self.connect() as c: c.execute("DELETE FROM inventory_inspection WHERE id=?", (row_id,))
 
     # ---------- Backup ----------
     def backup_bytes(self) -> bytes:

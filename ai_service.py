@@ -428,6 +428,17 @@ class ProjectContextBuilder:
         approved = sum(1 for r in rows if str(r.get("status") or "").strip().lower() in approved_words)
         return rows, {"total": len(rows), "approved": approved, "pending": len(rows) - approved}
 
+    def _cost_and_material(self, c, project_id: int) -> dict:
+        out = {"budgets": [], "payments": [], "variations": [], "materials": [], "procurements": [], "inventory": []}
+        table_map = {
+            "budgets": "cost_budgets", "payments": "payment_tracking", "variations": "cost_variations",
+            "materials": "material_master", "procurements": "procurement_schedule", "inventory": "inventory_inspection",
+        }
+        for key, table in table_map.items():
+            if self.table_exists(c, table):
+                out[key] = _rows_to_dicts(c.execute(f"SELECT * FROM {table} WHERE project_id=? ORDER BY id DESC LIMIT 120", (project_id,)).fetchall())
+        return out
+
     def _legal(self, c, question: str, limit: int = 50) -> list[dict]:
         if not self.table_exists(c, "legal_documents"):
             return []
@@ -456,6 +467,7 @@ class ProjectContextBuilder:
             tasks, tstats = self._tasks(c, project_id, status_date)
             docs, dstats = self._documents(c, project_id, status_date)
             drawings, drstats = self._drawings(c, project_id)
+            cm = self._cost_and_material(c, project_id)
             legal = self._legal(c, question, max_legal)
 
         lines = [
@@ -467,6 +479,8 @@ class ProjectContextBuilder:
             f"Tiến độ: {tstats['total']} công việc | KH TB {tstats['avg_planned']}% | TT TB {tstats['avg_actual']}% | hoàn thành {tstats['done']} | đang trễ {tstats['delayed']} | critical {tstats['critical']}",
             f"Hồ sơ: {dstats['total']} | đang mở {dstats['open']} | quá hạn {dstats['overdue']}",
             f"Bản vẽ: {drstats['total']} | chấp thuận {drstats['approved']} | còn lại {drstats['pending']}",
+            f"Chi phí: BAC {sum(float(r.get('budget_total') or 0) for r in cm['budgets']):,.0f} VND | đã thanh toán {sum(float(r.get('paid_amount') or 0) for r in cm['payments']):,.0f} VND | VO duyệt {sum(float(r.get('approved_amount') or 0) for r in cm['variations']):,.0f} VND",
+            f"Vật tư: {len(cm['materials'])} chủng loại | {len(cm['procurements'])} kế hoạch mua sắm | {len(cm['inventory'])} phiếu nhập/xuất/kiểm định",
             "",
             "## CÔNG VIỆC RỦI RO/ƯU TIÊN",
         ]
@@ -491,6 +505,24 @@ class ProjectContextBuilder:
                 lines.append(
                     f"{ref} {r.get('title','')} | bộ môn={r.get('discipline','')} | trạng thái={r.get('status','')} | ngày nhận={r.get('received_date','')} | WBS={r.get('related_wbs','')} | thay thế/tham chiếu={r.get('reference_no','')}"
                 )
+
+        if cm["budgets"] or cm["payments"] or cm["variations"]:
+            lines += ["", "## CHI PHÍ / THANH TOÁN / PHÁT SINH"]
+            for r in cm["budgets"][:60]:
+                lines.append(f"[COST:BOQ/{r.get('id')}] task={r.get('task_ref','')} | {r.get('boq_item','')} | qty={r.get('quantity',0)} {r.get('unit','')} | unitPrice={r.get('unit_price',0)} | BAC={r.get('budget_total',0)} | hợp đồng={r.get('contract_type','')} | nhà thầu={r.get('contractor','')}")
+            for r in cm["payments"][:60]:
+                lines.append(f"[COST:PAY/{r.get('payment_code','')}] task={r.get('task_ref','')} | đợt={r.get('installment','')} | nghiệm thu LK={r.get('certified_cumulative',0)} | đã trả={r.get('paid_amount',0)} | tạm ứng={r.get('advance_amount',0)} | thu hồi={r.get('advance_recovery',0)} | KH giải ngân={r.get('planned_disbursement_pct',0)}% | trạng thái={r.get('payment_status','')}")
+            for r in cm["variations"][:60]:
+                lines.append(f"[COST:VO/{r.get('vo_code','')}] task={r.get('task_ref','')} | {r.get('description','')} | trình={r.get('proposed_amount',0)} | duyệt={r.get('approved_amount',0)} | nguồn={r.get('funding_source','')} | trạng thái={r.get('status','')}")
+
+        if cm["materials"] or cm["procurements"] or cm["inventory"]:
+            lines += ["", "## VẬT TƯ / MUA SẮM / NHẬP-XUẤT-KIỂM ĐỊNH"]
+            for r in cm["materials"][:80]:
+                lines.append(f"[MAT:{r.get('material_code','')}] {r.get('material_name','')} | spec={r.get('spec_brand','')} | legal={r.get('legal_ref','')} | nguồn={r.get('supply_type','')} | task={r.get('task_ref','')}")
+            for r in cm["procurements"][:80]:
+                lines.append(f"[PROC:{r.get('material_code','')}/{r.get('id')}] task={r.get('task_ref','')} | NCC={r.get('supplier','')} | duyệt mẫu={r.get('sample_approval_date','')} | đặt hàng={r.get('order_date','')} | giao KH={r.get('planned_delivery_date','')} | thực tế={r.get('actual_delivery_date','')} | trạng thái={r.get('status','')}")
+            for r in cm["inventory"][:80]:
+                lines.append(f"[INV:{r.get('slip_code','')}] vật tư={r.get('material_code','')} | nhập={r.get('quantity_in',0)} | xuất={r.get('quantity_out',0)} | task={r.get('task_ref','')} | biên bản={r.get('inspection_code','')} | trạng thái={r.get('material_status','')}")
 
         if legal:
             lines += ["", "## VĂN BẢN/TCVN/QCVN TRONG KHO ỨNG DỤNG (metadata)"]
