@@ -266,6 +266,23 @@ class CloudDatabase:
                 UNIQUE(workflow_id, stage_code)
             );
 
+            CREATE TABLE IF NOT EXISTS approval_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workflow_id INTEGER NOT NULL,
+                revision_no INTEGER DEFAULT 0,
+                stage_code TEXT DEFAULT '',
+                stage_label TEXT DEFAULT '',
+                action TEXT NOT NULL,
+                status TEXT DEFAULT '',
+                comment TEXT DEFAULT '',
+                actor_email TEXT DEFAULT '',
+                actor_name TEXT DEFAULT '',
+                created_at TEXT DEFAULT '',
+                FOREIGN KEY(workflow_id) REFERENCES approval_workflows(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_approval_history_workflow
+                ON approval_history(workflow_id, id);
 
             CREATE TABLE IF NOT EXISTS cost_budgets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -413,6 +430,10 @@ class CloudDatabase:
                 },
                 "documents": {"note": "TEXT DEFAULT ''"},
                 "drawings": {"file_updated_at": "TEXT DEFAULT ''"},
+                "approval_workflows": {
+                    "revision_no": "INTEGER DEFAULT 0",
+                    "return_stage": "TEXT DEFAULT ''",
+                },
             }
             for table, cols in additions.items():
                 existing = self._columns(c, table)
@@ -712,65 +733,229 @@ class CloudDatabase:
 
     def approval_workflow(self, project_id: int, record_kind: str, subtype: str, record_id: int):
         with self.connect() as c:
-            return c.execute("SELECT * FROM approval_workflows WHERE project_id=? AND record_kind=? AND subtype=? AND record_id=?",
-                             (project_id, record_kind, subtype, record_id)).fetchone()
+            return c.execute(
+                "SELECT * FROM approval_workflows WHERE project_id=? AND record_kind=? AND subtype=? AND record_id=?",
+                (project_id, record_kind, subtype, record_id),
+            ).fetchone()
 
     def approval_steps(self, workflow_id: int):
         with self.connect() as c:
-            return c.execute("SELECT * FROM approval_steps WHERE workflow_id=? ORDER BY stage_order", (workflow_id,)).fetchall()
+            return c.execute(
+                "SELECT * FROM approval_steps WHERE workflow_id=? ORDER BY stage_order",
+                (workflow_id,),
+            ).fetchall()
+
+    def approval_history(self, workflow_id: int):
+        with self.connect() as c:
+            return c.execute(
+                "SELECT * FROM approval_history WHERE workflow_id=? ORDER BY id DESC",
+                (workflow_id,),
+            ).fetchall()
+
+    def _approval_log(self, c, workflow_id: int, revision_no: int, stage_code: str, stage_label: str,
+                      action: str, status: str, comment: str = "", actor_email: str = "", actor_name: str = ""):
+        c.execute(
+            """INSERT INTO approval_history(
+                   workflow_id,revision_no,stage_code,stage_label,action,status,comment,actor_email,actor_name,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (workflow_id, revision_no, stage_code, stage_label, action, status, comment, actor_email, actor_name, _now()),
+        )
 
     def start_approval_workflow(self, project_id: int, record_kind: str, subtype: str, record_id: int, record_code: str,
-                                submitted_by: str, approvers: dict) -> int:
+                                submitted_by: str, approvers: dict, submitted_name: str = "") -> int:
+        """Khởi tạo quy trình lần đầu. Không xóa lịch sử của workflow đã tồn tại."""
         now = _now()
         with self.connect() as c:
-            old = c.execute("SELECT id FROM approval_workflows WHERE project_id=? AND record_kind=? AND subtype=? AND record_id=?",
-                            (project_id, record_kind, subtype, record_id)).fetchone()
+            old = c.execute(
+                "SELECT * FROM approval_workflows WHERE project_id=? AND record_kind=? AND subtype=? AND record_id=?",
+                (project_id, record_kind, subtype, record_id),
+            ).fetchone()
             if old:
-                wid=int(old["id"]); c.execute("DELETE FROM approval_steps WHERE workflow_id=?", (wid,))
-                c.execute("UPDATE approval_workflows SET overall_status='Đang duyệt - Ban điều hành',current_stage='SITE_MANAGEMENT',submitted_by=?,submitted_at=?,final_approved_at='',updated_at=? WHERE id=?",
-                          (submitted_by, now, now, wid))
-            else:
-                cur=c.execute("INSERT INTO approval_workflows(project_id,record_kind,subtype,record_id,record_code,overall_status,current_stage,submitted_by,submitted_at,updated_at) VALUES(?,?,?,?,?,'Đang duyệt - Ban điều hành','SITE_MANAGEMENT',?,?,?)",
-                              (project_id,record_kind,subtype,record_id,record_code,submitted_by,now,now)); wid=int(cur.lastrowid)
+                current = str(old["current_stage"] or "")
+                if current == "CONTRACTOR":
+                    return self._resubmit_approval_workflow_in_connection(c, int(old["id"]), submitted_by, submitted_name)
+                if current == "DONE":
+                    raise ValueError("Hồ sơ đã phê duyệt hoàn tất; không thể trình lại quy trình đang đóng.")
+                raise ValueError("Hồ sơ đang trong quy trình phê duyệt; không thể khởi tạo lại.")
+
+            cur = c.execute(
+                """INSERT INTO approval_workflows(
+                       project_id,record_kind,subtype,record_id,record_code,overall_status,current_stage,submitted_by,
+                       submitted_at,final_approved_at,updated_at,revision_no,return_stage
+                   ) VALUES(?,?,?,?,?,'Đang duyệt - Ban điều hành','SITE_MANAGEMENT',?,?, '', ?,0,'')""",
+                (project_id, record_kind, subtype, record_id, record_code, submitted_by, now, now),
+            )
+            wid = int(cur.lastrowid)
             for code, order, label in self.APPROVAL_STAGES:
-                info=approvers.get(code) or {}
-                status='Đã trình' if code=='CONTRACTOR' else ('Đang chờ duyệt' if code=='SITE_MANAGEMENT' else 'Chờ')
-                c.execute("INSERT INTO approval_steps(workflow_id,stage_code,stage_order,stage_label,approver_email,approver_name,status,acted_by,acted_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                          (wid,code,order,label,str(info.get('email') or ''),str(info.get('name') or ''),status, submitted_by if code=='CONTRACTOR' else '', now if code=='CONTRACTOR' else ''))
-            table = 'documents' if record_kind == 'document' else 'drawings'
+                info = approvers.get(code) or {}
+                status = "Đã trình" if code == "CONTRACTOR" else ("Đang chờ duyệt" if code == "SITE_MANAGEMENT" else "Chờ")
+                c.execute(
+                    """INSERT INTO approval_steps(
+                           workflow_id,stage_code,stage_order,stage_label,approver_email,approver_name,status,acted_by,acted_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (wid, code, order, label, str(info.get("email") or ""), str(info.get("name") or ""), status,
+                     submitted_by if code == "CONTRACTOR" else "", now if code == "CONTRACTOR" else ""),
+                )
+            table = "documents" if record_kind == "document" else "drawings"
             c.execute(f"UPDATE {table} SET status='Đang phê duyệt',updated_at=? WHERE id=?", (now, record_id))
+            self._approval_log(c, wid, 0, "CONTRACTOR", "Nhà thầu", "SUBMIT", "Đã trình",
+                               actor_email=submitted_by, actor_name=submitted_name)
             return wid
 
-    def approval_action(self, workflow_id: int, stage_code: str, actor_email: str, action: str, comment: str):
-        now=_now(); action=action.upper()
+    def _resubmit_approval_workflow_in_connection(self, c, workflow_id: int, submitted_by: str, submitted_name: str = "") -> int:
+        wf = c.execute("SELECT * FROM approval_workflows WHERE id=?", (workflow_id,)).fetchone()
+        if not wf:
+            raise ValueError("Không tìm thấy quy trình duyệt.")
+        if str(wf["current_stage"] or "") != "CONTRACTOR":
+            raise ValueError("Hồ sơ chưa ở trạng thái chờ Nhà thầu chỉnh sửa.")
+        target_stage = str(wf["return_stage"] or "SITE_MANAGEMENT")
+        target = c.execute(
+            "SELECT * FROM approval_steps WHERE workflow_id=? AND stage_code=?",
+            (workflow_id, target_stage),
+        ).fetchone()
+        if not target:
+            raise ValueError("Không tìm thấy cấp duyệt cần trình lại.")
+        revision_no = int(wf["revision_no"] or 0) + 1
+        now = _now()
+
+        # Nhà thầu đã cập nhật hồ sơ; chỉ mở lại đúng cấp đã trả hồ sơ.
+        c.execute(
+            "UPDATE approval_steps SET status='Đã trình lại',acted_by=?,acted_at=? WHERE workflow_id=? AND stage_code='CONTRACTOR'",
+            (submitted_by, now, workflow_id),
+        )
+        c.execute(
+            "UPDATE approval_steps SET status='Đang chờ duyệt',comment='',acted_by='',acted_at='' WHERE id=?",
+            (target["id"],),
+        )
+        c.execute(
+            "UPDATE approval_steps SET status='Chờ' WHERE workflow_id=? AND stage_order>?",
+            (workflow_id, target["stage_order"]),
+        )
+        overall = "Trình lại - Đang duyệt - " + str(target["stage_label"])
+        c.execute(
+            """UPDATE approval_workflows
+               SET overall_status=?,current_stage=?,submitted_by=?,submitted_at=?,updated_at=?,revision_no=?,return_stage=''
+               WHERE id=?""",
+            (overall, target_stage, submitted_by, now, now, revision_no, workflow_id),
+        )
+        table = "documents" if wf["record_kind"] == "document" else "drawings"
+        c.execute(f"UPDATE {table} SET status=?,updated_at=? WHERE id=?", (overall, now, wf["record_id"]))
+        self._approval_log(c, workflow_id, revision_no, "CONTRACTOR", "Nhà thầu", "RESUBMIT", overall,
+                           actor_email=submitted_by, actor_name=submitted_name)
+        return workflow_id
+
+    def resubmit_approval_workflow(self, workflow_id: int, submitted_by: str, submitted_name: str = "") -> dict:
         with self.connect() as c:
-            wf=c.execute("SELECT * FROM approval_workflows WHERE id=?",(workflow_id,)).fetchone()
-            if not wf: raise ValueError('Không tìm thấy quy trình duyệt.')
-            step=c.execute("SELECT * FROM approval_steps WHERE workflow_id=? AND stage_code=?",(workflow_id,stage_code)).fetchone()
-            if not step: raise ValueError('Không tìm thấy bước duyệt.')
-            if str(step['approver_email'] or '').lower()!=str(actor_email or '').lower(): raise PermissionError('Bạn không phải người được chỉ định duyệt bước này.')
-            if action=='APPROVE':
-                c.execute("UPDATE approval_steps SET status='Đã duyệt',comment=?,acted_by=?,acted_at=? WHERE id=?",(comment,actor_email,now,step['id']))
-                next_step=c.execute("SELECT * FROM approval_steps WHERE workflow_id=? AND stage_order>? ORDER BY stage_order LIMIT 1",(workflow_id,step['stage_order'])).fetchone()
+            wid = self._resubmit_approval_workflow_in_connection(c, workflow_id, submitted_by, submitted_name)
+            wf = c.execute("SELECT * FROM approval_workflows WHERE id=?", (wid,)).fetchone()
+            step = c.execute(
+                "SELECT * FROM approval_steps WHERE workflow_id=? AND stage_code=?",
+                (wid, wf["current_stage"]),
+            ).fetchone()
+            return {
+                "workflow_id": wid,
+                "next_email": step["approver_email"] if step else "",
+                "next_name": step["approver_name"] if step else "",
+                "status": wf["overall_status"],
+                "current_stage": wf["current_stage"],
+                "revision_no": int(wf["revision_no"] or 0),
+            }
+
+    def approval_action(self, workflow_id: int, stage_code: str, actor_email: str, action: str, comment: str, actor_name: str = ""):
+        now = _now()
+        action = action.upper().strip()
+        with self.connect() as c:
+            wf = c.execute("SELECT * FROM approval_workflows WHERE id=?", (workflow_id,)).fetchone()
+            if not wf:
+                raise ValueError("Không tìm thấy quy trình duyệt.")
+            if str(wf["current_stage"] or "") != stage_code:
+                raise ValueError("Bước duyệt này không còn là bước đang chờ xử lý.")
+            step = c.execute(
+                "SELECT * FROM approval_steps WHERE workflow_id=? AND stage_code=?",
+                (workflow_id, stage_code),
+            ).fetchone()
+            if not step:
+                raise ValueError("Không tìm thấy bước duyệt.")
+            if str(step["approver_email"] or "").lower() != str(actor_email or "").lower():
+                raise PermissionError("Bạn không phải người được chỉ định duyệt bước này.")
+            if str(step["status"] or "") != "Đang chờ duyệt":
+                raise ValueError("Bước này đã được xử lý hoặc chưa đến lượt duyệt.")
+
+            revision_no = int(wf["revision_no"] or 0)
+            if action == "APPROVE":
+                c.execute(
+                    "UPDATE approval_steps SET status='Đã duyệt',comment=?,acted_by=?,acted_at=? WHERE id=?",
+                    (comment, actor_email, now, step["id"]),
+                )
+                self._approval_log(c, workflow_id, revision_no, stage_code, str(step["stage_label"]),
+                                   "APPROVE", "Đã duyệt", comment, actor_email, actor_name)
+                next_step = c.execute(
+                    "SELECT * FROM approval_steps WHERE workflow_id=? AND stage_order>? ORDER BY stage_order LIMIT 1",
+                    (workflow_id, step["stage_order"]),
+                ).fetchone()
                 if next_step:
-                    c.execute("UPDATE approval_steps SET status='Đang chờ duyệt' WHERE id=?",(next_step['id'],))
-                    overall='Đang duyệt - '+str(next_step['stage_label']); current=str(next_step['stage_code'])
-                    c.execute("UPDATE approval_workflows SET overall_status=?,current_stage=?,updated_at=? WHERE id=?",(overall,current,now,workflow_id))
-                    table = 'documents' if wf['record_kind'] == 'document' else 'drawings'
-                    c.execute(f"UPDATE {table} SET status=?,updated_at=? WHERE id=?", (overall, now, wf['record_id']))
-                    return {'completed':False,'next_email':next_step['approver_email'],'next_name':next_step['approver_name'],'status':overall}
-                c.execute("UPDATE approval_workflows SET overall_status='Đã phê duyệt',current_stage='DONE',final_approved_at=?,updated_at=? WHERE id=?",(now,now,workflow_id))
-                table = 'documents' if wf['record_kind'] == 'document' else 'drawings'
-                c.execute(f"UPDATE {table} SET status='Đã phê duyệt',updated_at=? WHERE id=?", (now, wf['record_id']))
-                return {'completed':True,'next_email':wf['submitted_by'],'next_name':'Nhà thầu','status':'Đã phê duyệt'}
-            if action=='REJECT':
-                c.execute("UPDATE approval_steps SET status='Yêu cầu chỉnh sửa',comment=?,acted_by=?,acted_at=? WHERE id=?",(comment,actor_email,now,step['id']))
-                reject_status = 'Yêu cầu chỉnh sửa - '+str(step['stage_label'])
-                c.execute("UPDATE approval_workflows SET overall_status=?,current_stage='CONTRACTOR',updated_at=? WHERE id=?",(reject_status,now,workflow_id))
-                table = 'documents' if wf['record_kind'] == 'document' else 'drawings'
-                c.execute(f"UPDATE {table} SET status=?,updated_at=? WHERE id=?", (reject_status, now, wf['record_id']))
-                return {'completed':False,'next_email':wf['submitted_by'],'next_name':'Nhà thầu','status':reject_status}
-            raise ValueError('Hành động duyệt không hợp lệ.')
+                    c.execute("UPDATE approval_steps SET status='Đang chờ duyệt' WHERE id=?", (next_step["id"],))
+                    overall = "Đang duyệt - " + str(next_step["stage_label"])
+                    current = str(next_step["stage_code"])
+                    c.execute(
+                        "UPDATE approval_workflows SET overall_status=?,current_stage=?,updated_at=?,return_stage='' WHERE id=?",
+                        (overall, current, now, workflow_id),
+                    )
+                    table = "documents" if wf["record_kind"] == "document" else "drawings"
+                    c.execute(f"UPDATE {table} SET status=?,updated_at=? WHERE id=?", (overall, now, wf["record_id"]))
+                    return {
+                        "completed": False,
+                        "next_email": next_step["approver_email"],
+                        "next_name": next_step["approver_name"],
+                        "status": overall,
+                        "current_stage": current,
+                    }
+
+                c.execute(
+                    """UPDATE approval_workflows
+                       SET overall_status='Đã phê duyệt',current_stage='DONE',final_approved_at=?,updated_at=?,return_stage=''
+                       WHERE id=?""",
+                    (now, now, workflow_id),
+                )
+                table = "documents" if wf["record_kind"] == "document" else "drawings"
+                c.execute(f"UPDATE {table} SET status='Đã phê duyệt',updated_at=? WHERE id=?", (now, wf["record_id"]))
+                self._approval_log(c, workflow_id, revision_no, "DONE", "Hoàn tất", "COMPLETE", "Đã phê duyệt",
+                                   actor_email=actor_email, actor_name=actor_name)
+                return {
+                    "completed": True,
+                    "next_email": wf["submitted_by"],
+                    "next_name": "Nhà thầu",
+                    "status": "Đã phê duyệt",
+                    "current_stage": "DONE",
+                }
+
+            if action in {"REJECT", "REQUEST_REVISION"}:
+                if not str(comment or "").strip():
+                    raise ValueError("Cần nhập ý kiến khi yêu cầu chỉnh sửa.")
+                c.execute(
+                    "UPDATE approval_steps SET status='Yêu cầu chỉnh sửa',comment=?,acted_by=?,acted_at=? WHERE id=?",
+                    (comment, actor_email, now, step["id"]),
+                )
+                overall = "Chờ Nhà thầu chỉnh sửa - " + str(step["stage_label"])
+                c.execute(
+                    """UPDATE approval_workflows
+                       SET overall_status=?,current_stage='CONTRACTOR',return_stage=?,updated_at=? WHERE id=?""",
+                    (overall, stage_code, now, workflow_id),
+                )
+                table = "documents" if wf["record_kind"] == "document" else "drawings"
+                c.execute(f"UPDATE {table} SET status=?,updated_at=? WHERE id=?", (overall, now, wf["record_id"]))
+                self._approval_log(c, workflow_id, revision_no, stage_code, str(step["stage_label"]),
+                                   "REQUEST_REVISION", overall, comment, actor_email, actor_name)
+                return {
+                    "completed": False,
+                    "next_email": wf["submitted_by"],
+                    "next_name": "Nhà thầu",
+                    "status": overall,
+                    "current_stage": "CONTRACTOR",
+                    "return_stage": stage_code,
+                }
+
+            raise ValueError("Hành động duyệt không hợp lệ.")
 
     # ---------- Cost management ----------
     def cost_budgets(self, project_id: int):

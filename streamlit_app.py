@@ -801,9 +801,14 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
     eligible = subtype in (APPROVAL_ELIGIBLE_DOCS if record_kind == "document" else APPROVAL_ELIGIBLE_DRAWINGS)
     if not eligible:
         return
+
     st.markdown("### ✅ Phê duyệt online")
+    st.caption("Nhà thầu trình → Ban điều hành → Tư vấn giám sát → Ban QLDA → Đã phê duyệt")
+    st.caption("↩ Nếu một cấp yêu cầu chỉnh sửa: hồ sơ quay về Nhà thầu; sau khi cập nhật sẽ trình lại đúng cấp đã trả hồ sơ.")
+
     identity = _cloud_identity()
     email = str(identity.get("email") or "").lower()
+    display_name = str(identity.get("name") or "")
     approval_role = str(identity.get("approval_role") or "")
     wf = db.approval_workflow(pid, record_kind, subtype, record_id)
 
@@ -814,23 +819,35 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
             ar = str(u.get("approval_role") or "")
             if ar:
                 by_role.setdefault(ar, []).append(u)
+
         contractor_ok = approval_role == "CONTRACTOR" or _is_admin()
         if not contractor_ok:
-            st.info("Hồ sơ chưa được nhà thầu trình duyệt.")
+            st.info("Hồ sơ chưa được Nhà thầu trình duyệt.")
             return
+
         missing = [r for r in ("SITE_MANAGEMENT", "CONSULTANT", "PROJECT_MANAGEMENT") if not by_role.get(r)]
         if missing:
             st.warning("Chưa khai báo người duyệt cho: " + ", ".join(APPROVAL_ROLE_LABELS[x] for x in missing))
             return
+
+        st.markdown("#### Chỉ định người duyệt")
         c1, c2, c3 = st.columns(3)
         selected_approvers = {}
         for col, role_code in zip((c1, c2, c3), ("SITE_MANAGEMENT", "CONSULTANT", "PROJECT_MANAGEMENT")):
             opts = by_role[role_code]
-            choice = col.selectbox(APPROVAL_ROLE_LABELS[role_code], opts, format_func=lambda u: f"{u.get('name','')} • {u.get('email','')}", key=f"approver_{record_kind}_{subtype}_{record_id}_{role_code}")
+            choice = col.selectbox(
+                APPROVAL_ROLE_LABELS[role_code],
+                opts,
+                format_func=lambda u: f"{u.get('name','')} • {u.get('email','')}",
+                key=f"approver_{record_kind}_{subtype}_{record_id}_{role_code}",
+            )
             selected_approvers[role_code] = choice
+
         if st.button("📤 Trình phê duyệt", type="primary", key=f"submit_approval_{record_kind}_{subtype}_{record_id}"):
-            approvers = {"CONTRACTOR": {"email": email, "name": identity.get("name", "")}, **selected_approvers}
-            db.start_approval_workflow(pid, record_kind, subtype, record_id, record_code, email, approvers)
+            approvers = {"CONTRACTOR": {"email": email, "name": display_name}, **selected_approvers}
+            db.start_approval_workflow(
+                pid, record_kind, subtype, record_id, record_code, email, approvers, submitted_name=display_name
+            )
             first = selected_approvers["SITE_MANAGEMENT"]
             _send_approval_notice(first.get("email", ""), record_code, record_title, "Chờ Ban điều hành phê duyệt")
             st.success("Đã trình phê duyệt và gửi thông báo cho Ban điều hành.")
@@ -838,50 +855,123 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
         return
 
     steps = db.approval_steps(int(wf["id"]))
-    st.success(f"Trạng thái: {wf['overall_status']}" if wf["overall_status"] == "Đã phê duyệt" else f"Trạng thái: {wf['overall_status']}")
-    cols = st.columns(4)
-    for col, step in zip(cols, steps):
-        with col:
-            status = str(step["status"] or "")
-            icon = "✅" if status in {"Đã duyệt", "Đã trình"} else ("🟡" if status == "Đang chờ duyệt" else ("🔴" if "chỉnh sửa" in status.lower() else "⚪"))
-            st.markdown(f"**{icon} {step['stage_label']}**")
-            st.write(step["approver_name"] or step["approver_email"] or "—")
-            st.write(status)
-            if step["comment"]:
-                st.write("💬 " + str(step["comment"]))
-            if step["acted_at"]:
-                st.write(str(step["acted_at"])[:19])
-
     current_stage = str(wf["current_stage"] or "")
+    revision_no = int(wf["revision_no"] or 0)
+
+    h1, h2 = st.columns([3, 1])
+    h1.info(f"**Trạng thái:** {wf['overall_status']}")
+    h2.metric("Lần chỉnh sửa", revision_no)
+
+    st.markdown("#### Sơ đồ trạng thái")
+    flow_cols = st.columns(5)
+    step_by_code = {str(x["stage_code"]): x for x in steps}
+    flow_items = [
+        ("CONTRACTOR", "Nhà thầu"),
+        ("SITE_MANAGEMENT", "Ban điều hành"),
+        ("CONSULTANT", "TVGS"),
+        ("PROJECT_MANAGEMENT", "Ban QLDA"),
+        ("DONE", "Hoàn tất"),
+    ]
+    for col, (code, label) in zip(flow_cols, flow_items):
+        with col:
+            if code == "DONE":
+                status = "Đã phê duyệt" if current_stage == "DONE" else "Chờ"
+                icon = "✅" if current_stage == "DONE" else "⚪"
+                person = "—"
+            else:
+                step = step_by_code.get(code)
+                status = str(step["status"] or "Chờ") if step else "Chờ"
+                person = (step["approver_name"] or step["approver_email"] or "—") if step else "—"
+                if current_stage == code:
+                    icon = "🟡" if code != "CONTRACTOR" else "🛠️"
+                elif status in {"Đã duyệt", "Đã trình", "Đã trình lại"}:
+                    icon = "✅"
+                elif "chỉnh sửa" in status.lower():
+                    icon = "🔴"
+                else:
+                    icon = "⚪"
+            st.markdown(f"**{icon} {label}**")
+            if code != "DONE":
+                st.caption(person)
+            st.write(status)
+
+    with st.expander("🕘 Lịch sử phê duyệt", expanded=False):
+        history = db.approval_history(int(wf["id"]))
+        if history:
+            action_labels = {
+                "SUBMIT": "Trình duyệt",
+                "RESUBMIT": "Trình lại",
+                "APPROVE": "Phê duyệt",
+                "REQUEST_REVISION": "Yêu cầu chỉnh sửa",
+                "COMPLETE": "Hoàn tất",
+            }
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "Thời điểm": h["created_at"],
+                        "Lần chỉnh sửa": int(h["revision_no"] or 0),
+                        "Cấp xử lý": h["stage_label"],
+                        "Hành động": action_labels.get(str(h["action"]), h["action"]),
+                        "Người thao tác": h["actor_name"] or h["actor_email"],
+                        "Trạng thái": h["status"],
+                        "Ý kiến": h["comment"],
+                    }
+                    for h in history
+                ]),
+                hide_index=True,
+                width="stretch",
+            )
+        else:
+            st.caption("Chưa có lịch sử thao tác.")
+
     current_step = next((x for x in steps if str(x["stage_code"]) == current_stage), None)
     if current_step and current_stage not in {"DONE", "CONTRACTOR"} and str(current_step["approver_email"] or "").lower() == email:
-        comment = st.text_area("Ý kiến / Comment của người duyệt", key=f"approval_comment_{wf['id']}_{current_stage}")
+        st.markdown(f"#### Xử lý tại bước: {current_step['stage_label']}")
+        comment = st.text_area(
+            "Ý kiến / Comment của người duyệt",
+            key=f"approval_comment_{wf['id']}_{current_stage}_{revision_no}",
+            placeholder="Có thể nhập ý kiến khi phê duyệt; bắt buộc nhập khi yêu cầu chỉnh sửa.",
+        )
         b1, b2 = st.columns(2)
-        if b1.button("✅ Phê duyệt", type="primary", key=f"approve_{wf['id']}_{current_stage}"):
-            result = db.approval_action(int(wf["id"]), current_stage, email, "APPROVE", comment)
+        if b1.button("✅ Phê duyệt", type="primary", key=f"approve_{wf['id']}_{current_stage}_{revision_no}"):
+            result = db.approval_action(
+                int(wf["id"]), current_stage, email, "APPROVE", comment, actor_name=display_name
+            )
             _send_approval_notice(result.get("next_email", ""), record_code, record_title, result.get("status", ""), comment)
             st.rerun()
-        if b2.button("↩️ Yêu cầu chỉnh sửa", key=f"reject_{wf['id']}_{current_stage}"):
+        if b2.button("↩️ Yêu cầu chỉnh sửa", key=f"reject_{wf['id']}_{current_stage}_{revision_no}"):
             if not comment.strip():
-                st.error("Cần nhập comment khi yêu cầu chỉnh sửa.")
+                st.error("Cần nhập ý kiến khi yêu cầu chỉnh sửa.")
             else:
-                result = db.approval_action(int(wf["id"]), current_stage, email, "REJECT", comment)
+                result = db.approval_action(
+                    int(wf["id"]), current_stage, email, "REQUEST_REVISION", comment, actor_name=display_name
+                )
                 _send_approval_notice(result.get("next_email", ""), record_code, record_title, result.get("status", ""), comment)
                 st.rerun()
+
     elif current_stage == "CONTRACTOR" and (approval_role == "CONTRACTOR" or _is_admin()):
-        st.warning("Hồ sơ đã bị yêu cầu chỉnh sửa. Sau khi cập nhật file/nội dung, hãy trình lại quy trình duyệt.")
-        if st.button("🔄 Trình lại sau chỉnh sửa", key=f"resubmit_{wf['id']}"):
-            users = _approval_users(); by_role={}
-            for u in users:
-                ar=str(u.get('approval_role') or '')
-                if ar: by_role.setdefault(ar,[]).append(u)
-            approvers={"CONTRACTOR":{"email":email,"name":identity.get('name','')}}
-            old_steps={str(x['stage_code']):x for x in steps}
-            for rc in ("SITE_MANAGEMENT","CONSULTANT","PROJECT_MANAGEMENT"):
-                old=old_steps.get(rc); approvers[rc]={"email": old['approver_email'] if old else '', "name": old['approver_name'] if old else ''}
-            db.start_approval_workflow(pid, record_kind, subtype, record_id, record_code, email, approvers)
-            _send_approval_notice(approvers['SITE_MANAGEMENT']['email'], record_code, record_title, "Trình lại - Chờ Ban điều hành phê duyệt")
+        return_stage = str(wf["return_stage"] or "SITE_MANAGEMENT")
+        return_label = APPROVAL_ROLE_LABELS.get(return_stage, return_stage)
+        st.warning(
+            f"Hồ sơ đang chờ Nhà thầu chỉnh sửa theo ý kiến của **{return_label}**. "
+            f"Sau khi cập nhật nội dung/file, bấm Trình lại để gửi thẳng về {return_label}."
+        )
+        if st.button("🔄 Trình lại sau chỉnh sửa", type="primary", key=f"resubmit_{wf['id']}_{revision_no}"):
+            result = db.resubmit_approval_workflow(int(wf["id"]), email, submitted_name=display_name)
+            _send_approval_notice(
+                result.get("next_email", ""), record_code, record_title, result.get("status", ""),
+                f"Nhà thầu đã cập nhật và trình lại lần {result.get('revision_no', revision_no + 1)}.",
+            )
+            st.success(f"Đã trình lại hồ sơ đến {return_label}.")
             st.rerun()
+
+    elif current_stage == "DONE":
+        st.success("✅ Quy trình đã hoàn tất. Hồ sơ đã được Ban QLDA phê duyệt.")
+    elif current_step:
+        st.caption(
+            f"Đang chờ {current_step['stage_label']} xử lý: "
+            f"{current_step['approver_name'] or current_step['approver_email'] or 'chưa xác định người duyệt'}."
+        )
 
 def render_document_type(pid: int, doc_type: str):
     cfg = DOC_CONFIG[doc_type]
