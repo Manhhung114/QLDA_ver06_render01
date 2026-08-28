@@ -22,8 +22,11 @@ DEFAULT_SPECIFIED_SEARCH_DOMAINS = [
 DEFAULT_SETTINGS: dict[str, Any] = {
     "google_api_key": "",
     "google_cx": "",
+    "ai_provider": "openai",
     "openai_api_key": "",
     "openai_model": "gpt-5-mini",
+    "gemini_api_key": "",
+    "gemini_model": "gemini-2.5-flash",
     "openai_web_search": False,
     "specified_search_domains": DEFAULT_SPECIFIED_SEARCH_DOMAINS,
     "drive_enabled": False,
@@ -69,7 +72,9 @@ def load_app_settings() -> dict[str, Any]:
             pass
 
     data["specified_search_domains"] = _clean_domains(data.get("specified_search_domains")) or list(DEFAULT_SPECIFIED_SEARCH_DOMAINS)
+    data["ai_provider"] = "gemini" if str(data.get("ai_provider") or "openai").strip().lower() == "gemini" else "openai"
     data["openai_model"] = str(data.get("openai_model") or "gpt-5-mini").strip() or "gpt-5-mini"
+    data["gemini_model"] = str(data.get("gemini_model") or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
     data["openai_web_search"] = bool(data.get("openai_web_search", False))
     data["drive_enabled"] = bool(data.get("drive_enabled", False))
     data["drive_auto_upload"] = bool(data.get("drive_auto_upload", False))
@@ -102,3 +107,26 @@ def get_openai_runtime_settings() -> dict[str, Any]:
         "model": (os.environ.get("OPENAI_MODEL") or str(cfg.get("openai_model", "gpt-5-mini"))).strip() or "gpt-5-mini",
         "use_web": use_web,
     }
+
+def get_ai_runtime_settings() -> dict[str, Any]:
+    cfg = load_app_settings()
+    provider = (os.environ.get("AI_PROVIDER") or str(cfg.get("ai_provider", "openai"))).strip().lower()
+    provider = "gemini" if provider == "gemini" else "openai"
+    env_web = os.environ.get("AI_WEB_SEARCH")
+    if env_web is None:
+        env_web = os.environ.get("GEMINI_WEB_SEARCH" if provider == "gemini" else "OPENAI_WEB_SEARCH")
+    use_web = bool(cfg.get("openai_web_search", False)) if env_web is None else env_web.strip().lower() in {"1", "true", "yes", "on"}
+    if provider == "gemini":
+        return {
+            "provider": "gemini",
+            "api_key": (os.environ.get("GEMINI_API_KEY") or str(cfg.get("gemini_api_key", ""))).strip(),
+            "model": (os.environ.get("GEMINI_MODEL") or str(cfg.get("gemini_model", "gemini-2.5-flash"))).strip() or "gemini-2.5-flash",
+            "use_web": use_web,
+        }
+    return {
+        "provider": "openai",
+        "api_key": (os.environ.get("OPENAI_API_KEY") or str(cfg.get("openai_api_key", ""))).strip(),
+        "model": (os.environ.get("OPENAI_MODEL") or str(cfg.get("openai_model", "gpt-5-mini"))).strip() or "gpt-5-mini",
+        "use_web": use_web,
+    }
+

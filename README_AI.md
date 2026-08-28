@@ -87,3 +87,24 @@ Streamlit:
 pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
+
+## V6.0 — OpenAI + Google Gemini
+
+Ứng dụng hỗ trợ chọn một trong hai nhà cung cấp AI tại **⚙ Cài đặt → AI**:
+
+- OpenAI: `OPENAI_API_KEY`, `OPENAI_MODEL`
+- Google Gemini: `GEMINI_API_KEY`, `GEMINI_MODEL`
+- Nhà cung cấp mặc định khi deploy: `AI_PROVIDER=openai` hoặc `AI_PROVIDER=gemini`
+- Tìm kiếm web cho phần pháp lý: `AI_WEB_SEARCH=true|false`
+
+Cấu hình mẫu cho Railway/Render:
+
+```env
+AI_PROVIDER=gemini
+GEMINI_API_KEY=YOUR_KEY
+GEMINI_MODEL=gemini-2.5-flash
+AI_WEB_SEARCH=true
+```
+
+Gemini dùng SDK `google-genai`. Chức năng Chat dự án, phân tích rủi ro, soạn báo cáo, đọc file và tra cứu văn bản dùng chung snapshot/luật an toàn với OpenAI.
+

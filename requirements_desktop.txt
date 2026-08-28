@@ -9,3 +9,4 @@ google-api-python-client>=2.160
 google-auth>=2.38
 google-auth-httplib2>=0.2
 google-auth-oauthlib>=1.2
+google-genai>=1.0,<2

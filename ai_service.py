@@ -46,6 +46,7 @@ def _redact_secret(text: str) -> str:
     """Không để API key/Bearer token lọt vào log hoặc popup lỗi."""
     text = str(text or "")
     text = re.sub(r"sk-[A-Za-z0-9_-]{8,}", "sk-***", text)
+    text = re.sub(r"AIza[A-Za-z0-9_-]{12,}", "AIza***", text)
     text = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~-]+", "Bearer ***", text)
     return text
 
@@ -207,6 +208,97 @@ class AISettings:
             model=os.environ.get("OPENAI_MODEL", "gpt-5-mini").strip() or "gpt-5-mini",
             use_web=os.environ.get("OPENAI_WEB_SEARCH", "0").strip().lower() in {"1", "true", "yes", "on"},
         )
+
+
+@dataclass
+class GeminiSettings:
+    api_key: str = ""
+    model: str = "gemini-2.5-flash"
+    use_web: bool = False
+
+    @classmethod
+    def from_env(cls) -> "GeminiSettings":
+        web = os.environ.get("AI_WEB_SEARCH", os.environ.get("GEMINI_WEB_SEARCH", "0"))
+        return cls(
+            api_key=os.environ.get("GEMINI_API_KEY", "").strip(),
+            model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash",
+            use_web=str(web or "0").strip().lower() in {"1", "true", "yes", "on"},
+        )
+
+
+def classify_gemini_error(exc) -> AIErrorInfo:
+    """Chuẩn hóa lỗi Google Gemini API thành thông báo tiếng Việt."""
+    raw_status = getattr(exc, "status_code", None)
+    if raw_status is None:
+        raw_status = getattr(exc, "code", None)
+    try:
+        status = int(raw_status) if raw_status is not None else None
+    except Exception:
+        status = None
+    msg = _redact_secret(str(getattr(exc, "message", "") or str(exc)))
+    low = f"{exc.__class__.__name__} {msg}".lower()
+
+    if status in {401, 403} or "api key not valid" in low or "permission denied" in low or "unauthenticated" in low:
+        return AIErrorInfo(
+            "invalid_api_key", "❌ Gemini API key không hợp lệ hoặc chưa có quyền",
+            "Không thể xác thực hoặc Project/API key chưa có quyền dùng Gemini API.",
+            "Kiểm tra GEMINI_API_KEY trong Render/Railway/Streamlit Secrets và quyền API key trên Google AI Studio.",
+            False, status or 403,
+        )
+    if status == 429 or "resource_exhausted" in low or "quota" in low or "rate limit" in low:
+        return AIErrorInfo(
+            "rate_limit", "⏱️ Gemini đang chạm quota/rate limit",
+            "Gemini API đã từ chối vì hạn mức hoặc tần suất gọi hiện tại.",
+            "Kiểm tra quota của Gemini API/Google AI Studio, chờ một lúc rồi thử lại hoặc chọn model có hạn mức phù hợp.",
+            True, status or 429,
+        )
+    if status == 404 or ("model" in low and "not found" in low):
+        return AIErrorInfo(
+            "model_not_found", "🧩 Gemini model không tồn tại hoặc chưa được cấp quyền",
+            "Model đang cấu hình không khả dụng cho API key hiện tại.",
+            "Đổi GEMINI_MODEL, ví dụ gemini-2.5-flash, rồi kiểm tra lại.",
+            False, status or 404,
+        )
+    if status == 400 or "invalid_argument" in low:
+        return AIErrorInfo(
+            "bad_request", "⚙️ Yêu cầu Gemini chưa hợp lệ",
+            msg[:400] or "Request không hợp lệ.",
+            "Kiểm tra model, file đầu vào và tùy chọn Google Search grounding.",
+            False, status or 400,
+        )
+    if "timeout" in low or "timed out" in low:
+        return AIErrorInfo(
+            "timeout", "🌐 Kết nối Gemini API bị timeout",
+            "Phản hồi không hoàn tất trong thời gian chờ.",
+            "Kiểm tra Internet rồi thử lại; với file lớn hãy thử yêu cầu ngắn hơn.",
+            True, status,
+        )
+    if any(x in low for x in ["connection", "network", "dns", "ssl", "certificate"]):
+        return AIErrorInfo(
+            "network", "🌐 Không kết nối được Gemini API",
+            "Có lỗi mạng/DNS/SSL khi app gọi Google Gemini.",
+            "Kiểm tra Internet, proxy/VPN và firewall rồi thử lại.",
+            True, status,
+        )
+    if status is not None and status >= 500:
+        return AIErrorInfo(
+            "server_error", "🛠️ Gemini API đang gặp lỗi tạm thời",
+            "Google Gemini trả lỗi máy chủ.",
+            "Chờ một lúc rồi thử lại.",
+            True, status,
+        )
+    return AIErrorInfo(
+        "unknown", "⚠️ Không gọi được Gemini API",
+        msg[:500] or exc.__class__.__name__,
+        "Kiểm tra GEMINI_API_KEY, GEMINI_MODEL, Internet và quota Gemini API.",
+        False, status,
+    )
+
+
+def gemini_error_to_service_error(exc) -> AIServiceError:
+    info = classify_gemini_error(exc)
+    return AIServiceError(info.user_text(), code=info.code, title=info.title,
+                          retryable=info.retryable, action=info.action)
 
 
 SYSTEM_INSTRUCTIONS = """Bạn là Trợ lý AI cho ứng dụng quản lý dự án xây dựng QLDA.
@@ -609,3 +701,149 @@ Bối cảnh dự án rút gọn:\n{snapshot}"""
             f"Model: {self.model}\n"
             "API key, quota/credit và quyền dùng model đã vượt qua phép kiểm tra cơ bản."
         )
+
+class GeminiProjectAssistant(OpenAIProjectAssistant):
+    """Gemini implementation with the same project-assistant interface as OpenAI."""
+
+    def __init__(self, db_path: str | Path, settings: GeminiSettings | None = None):
+        self.db_path = Path(db_path)
+        self.settings = settings or GeminiSettings.from_env()
+        self.context = ProjectContextBuilder(self.db_path)
+
+    def _client(self):
+        key = (self.settings.api_key or os.environ.get("GEMINI_API_KEY", "")).strip()
+        if not key:
+            raise AIServiceError("Chưa có GEMINI_API_KEY. Hãy cấu hình tại sheet Cài đặt hoặc dùng Secrets/biến môi trường.")
+        try:
+            from google import genai
+        except Exception as exc:
+            raise AIServiceError("Thiếu thư viện google-genai. Cài bằng: pip install google-genai") from exc
+        return genai.Client(api_key=key)
+
+    @property
+    def model(self) -> str:
+        return (self.settings.model or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")).strip() or "gemini-2.5-flash"
+
+    @staticmethod
+    def _content_text(content) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content") or ""
+                    if text:
+                        parts.append(str(text))
+                elif item is not None:
+                    parts.append(str(item))
+            return "\n".join(parts)
+        return str(content or "")
+
+    def _respond(self, input_items, use_web: bool | None = None) -> str:
+        client = self._client()
+        try:
+            from google.genai import types
+            system_parts: list[str] = []
+            contents = []
+            for item in input_items:
+                role = str(item.get("role") or "user")
+                text = self._content_text(item.get("content"))
+                if not text:
+                    continue
+                if role in {"developer", "system"}:
+                    system_parts.append(text)
+                    continue
+                gemini_role = "model" if role == "assistant" else "user"
+                contents.append(types.Content(
+                    role=gemini_role,
+                    parts=[types.Part.from_text(text=text)],
+                ))
+            if not contents:
+                contents = [types.Content(role="user", parts=[types.Part.from_text(text="OK")])]
+            tools = None
+            if self.settings.use_web if use_web is None else use_web:
+                tools = [types.Tool(google_search=types.GoogleSearch())]
+            cfg = types.GenerateContentConfig(
+                system_instruction="\n\n".join(system_parts) or SYSTEM_INSTRUCTIONS,
+                tools=tools,
+            )
+            response = client.models.generate_content(
+                model=self.model, contents=contents, config=cfg
+            )
+            text = getattr(response, "text", "") or ""
+            return text.strip() or "AI không trả về nội dung văn bản."
+        except AIServiceError:
+            raise
+        except Exception as exc:
+            raise gemini_error_to_service_error(exc) from exc
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def summarize_file(self, project_id: int, filename: str, file_bytes: bytes, instruction: str = "",
+                       status_date: date | None = None) -> str:
+        if not file_bytes:
+            raise AIServiceError("File rỗng.")
+        if len(file_bytes) > 25 * 1024 * 1024:
+            raise AIServiceError("AI giới hạn file tương tác ở 25 MB để kiểm soát thời gian và chi phí.")
+        client = self._client()
+        snapshot = self.context.build(
+            project_id, filename + " " + instruction, status_date,
+            max_tasks=30, max_docs=35, max_drawings=20, max_legal=20,
+        )
+        suffix = Path(filename).suffix or ".bin"
+        temp_path = None
+        uploaded = None
+        try:
+            from google.genai import types
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp.write(file_bytes)
+                temp_path = tmp.name
+            uploaded = client.files.upload(file=temp_path)
+            prompt = f"""Hãy đọc file đính kèm '{filename}' và hỗ trợ quản lý dự án xây dựng.
+Yêu cầu mặc định: tóm tắt nội dung; trích các mã/số liệu/ngày quan trọng; chỉ ra điểm cần kiểm tra; liệt kê hành động/đầu việc liên quan. Không tự phê duyệt hồ sơ.
+Yêu cầu bổ sung của người dùng: {instruction or 'Không có'}
+
+Bối cảnh dự án rút gọn:
+{snapshot}"""
+            response = client.models.generate_content(
+                model=self.model,
+                contents=[prompt, uploaded],
+                config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTIONS),
+            )
+            text = getattr(response, "text", "") or ""
+            return text.strip() or "AI không trả về nội dung."
+        except AIServiceError:
+            raise
+        except Exception as exc:
+            raise gemini_error_to_service_error(exc) from exc
+        finally:
+            if uploaded is not None:
+                try:
+                    client.files.delete(name=uploaded.name)
+                except Exception:
+                    pass
+            if temp_path:
+                try:
+                    Path(temp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def test_connection(self) -> str:
+        self._respond([
+            {"role": "developer", "content": "Trả lời ngắn gọn bằng tiếng Việt."},
+            {"role": "user", "content": "Trả lời đúng một từ: OK"},
+        ], use_web=False)
+        return (
+            "✅ GEMINI API HOẠT ĐỘNG\n"
+            f"Model: {self.model}\n"
+            "API key, quota cơ bản và quyền dùng model đã vượt qua phép kiểm tra."
+        )
+

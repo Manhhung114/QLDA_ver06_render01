@@ -49,14 +49,18 @@ class SettingsPage(QWidget):
 
     def _build_ai(self):
         page = QWidget(); form = QFormLayout(page)
-        info = QLabel("OpenAI API key được lưu trong thư mục cấu hình người dùng, không nằm trong project/GitHub. Biến môi trường OPENAI_API_KEY/OPENAI_MODEL vẫn được ưu tiên nếu có.")
+        info = QLabel("Chọn OpenAI hoặc Google Gemini làm nhà cung cấp AI. Biến môi trường AI_PROVIDER và API key tương ứng được ưu tiên nếu có.")
         info.setWordWrap(True); form.addRow(info)
+        self.ai_provider = QComboBox(); self.ai_provider.addItem("OpenAI", "openai"); self.ai_provider.addItem("Gemini", "gemini")
         self.openai_key = QLineEdit(); self.openai_key.setEchoMode(QLineEdit.EchoMode.Password); self.openai_key.setPlaceholderText("sk-...")
         self.openai_model = QLineEdit(); self.openai_model.setPlaceholderText("gpt-5-mini")
-        self.openai_web = QCheckBox("Cho phép Web Search khi AI tra cứu pháp lý")
-        diag = QLabel("Nút Kiểm tra AI ở sheet Trợ lý AI sẽ chẩn đoán riêng: API key • quota/credit • rate limit • quyền model • mạng/timeout.")
-        diag.setWordWrap(True)
-        form.addRow("OpenAI API key", self.openai_key); form.addRow("Model", self.openai_model); form.addRow("", self.openai_web); form.addRow("Chẩn đoán", diag)
+        self.gemini_key = QLineEdit(); self.gemini_key.setEchoMode(QLineEdit.EchoMode.Password); self.gemini_key.setPlaceholderText("Gemini API key")
+        self.gemini_model = QLineEdit(); self.gemini_model.setPlaceholderText("gemini-2.5-flash")
+        self.openai_web = QCheckBox("Cho phép tìm kiếm web khi AI tra cứu pháp lý")
+        form.addRow("Nhà cung cấp", self.ai_provider)
+        form.addRow("OpenAI API key", self.openai_key); form.addRow("OpenAI model", self.openai_model)
+        form.addRow("Gemini API key", self.gemini_key); form.addRow("Gemini model", self.gemini_model)
+        form.addRow("", self.openai_web)
         self.tabs.addTab(page, "🤖 AI")
 
     def _build_google(self):
@@ -142,8 +146,12 @@ class SettingsPage(QWidget):
 
     def load_values(self):
         cfg = load_app_settings()
+        idx = self.ai_provider.findData(str(cfg.get("ai_provider", "openai")))
+        self.ai_provider.setCurrentIndex(max(0, idx))
         self.openai_key.setText(str(cfg.get("openai_api_key", "")))
         self.openai_model.setText(str(cfg.get("openai_model", "gpt-5-mini")))
+        self.gemini_key.setText(str(cfg.get("gemini_api_key", "")))
+        self.gemini_model.setText(str(cfg.get("gemini_model", "gemini-2.5-flash")))
         self.openai_web.setChecked(bool(cfg.get("openai_web_search", False)))
         self.google_key.setText(str(cfg.get("google_api_key", "")))
         self.google_cx.setText(str(cfg.get("google_cx", "")))
@@ -179,8 +187,11 @@ class SettingsPage(QWidget):
                 # Không cho hạ quyền bằng cách tắt Drive khi trạng thái xác thực không rõ.
                 drive_payload = {k: current.get(k) for k in drive_payload}
         path = save_app_settings({
+            "ai_provider": self.ai_provider.currentData() or "openai",
             "openai_api_key": self.openai_key.text().strip(),
             "openai_model": self.openai_model.text().strip() or "gpt-5-mini",
+            "gemini_api_key": self.gemini_key.text().strip(),
+            "gemini_model": self.gemini_model.text().strip() or "gemini-2.5-flash",
             "openai_web_search": self.openai_web.isChecked(),
             "google_api_key": self.google_key.text().strip(),
             "google_cx": self.google_cx.text().strip(),

@@ -114,3 +114,15 @@ QLDA Xây dựng/
 ```
 
 Các file đã lưu theo cấu trúc cũ vẫn được đọc để bảo đảm tương thích.
+
+
+## Gemini AI trên Render/Railway
+
+```env
+AI_PROVIDER=gemini
+GEMINI_API_KEY=YOUR_GEMINI_KEY
+GEMINI_MODEL=gemini-2.5-flash
+AI_WEB_SEARCH=false
+```
+
+Có thể đổi `AI_PROVIDER=openai` để dùng OpenAI như trước.

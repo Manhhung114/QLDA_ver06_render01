@@ -11,8 +11,8 @@ from PySide6.QtWidgets import (
     QMessageBox, QFrame
 )
 
-from ai_service import AIServiceError, AISettings, OpenAIProjectAssistant, ProjectContextBuilder
-from settings_store import get_openai_runtime_settings
+from ai_service import AIServiceError, AISettings, OpenAIProjectAssistant, GeminiSettings, GeminiProjectAssistant, ProjectContextBuilder
+from settings_store import get_ai_runtime_settings
 
 
 class AIWorker(QThread):
@@ -131,20 +131,27 @@ class AIAssistantPage(QWidget):
         self.refresh_attachments()
 
     def refresh_settings_status(self):
-        cfg = get_openai_runtime_settings()
+        cfg = get_ai_runtime_settings()
         if not hasattr(self, "settings_status"):
             return
+        provider = "Gemini" if cfg.get("provider") == "gemini" else "OpenAI"
         if cfg.get("api_key"):
-            self.settings_status.setText(f"AI: ĐÃ CẤU HÌNH • Model: {cfg.get('model','gpt-5-mini')} • Web Search: {'Bật' if cfg.get('use_web') else 'Tắt'} • chỉnh tại ⚙ Cài đặt")
+            self.settings_status.setText(f"AI: {provider} • Model: {cfg.get('model','')} • Web Search: {'Bật' if cfg.get('use_web') else 'Tắt'} • chỉnh tại ⚙ Cài đặt")
         else:
-            self.settings_status.setText("AI: CHƯA CÓ OPENAI_API_KEY • vào sheet ⚙ Cài đặt để cấu hình.")
+            key_name = "GEMINI_API_KEY" if cfg.get("provider") == "gemini" else "OPENAI_API_KEY"
+            self.settings_status.setText(f"AI: CHƯA CÓ {key_name} • vào sheet ⚙ Cài đặt để cấu hình.")
 
-    def _settings(self) -> AISettings:
-        cfg = get_openai_runtime_settings()
+    def _settings(self):
+        cfg = get_ai_runtime_settings()
+        if cfg.get("provider") == "gemini":
+            return GeminiSettings(api_key=cfg.get("api_key", ""), model=cfg.get("model", "gemini-2.5-flash"), use_web=bool(cfg.get("use_web", False)))
         return AISettings(api_key=cfg.get("api_key", ""), model=cfg.get("model", "gpt-5-mini"), use_web=bool(cfg.get("use_web", False)))
 
-    def _assistant(self) -> OpenAIProjectAssistant:
-        return OpenAIProjectAssistant(self.db_path, self._settings())
+    def _assistant(self):
+        settings = self._settings()
+        if isinstance(settings, GeminiSettings):
+            return GeminiProjectAssistant(self.db_path, settings)
+        return OpenAIProjectAssistant(self.db_path, settings)
 
     def _require_project(self) -> bool:
         if not self.project_id:

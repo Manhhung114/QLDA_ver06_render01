@@ -8,3 +8,4 @@ requests>=2.32,<3
 certifi>=2024.8
 beautifulsoup4>=4.12,<5
 openai>=1.0
+google-genai>=1.0,<2
