@@ -760,6 +760,40 @@ APPROVAL_ROLE_LABELS = {
     "CONSULTANT": "Tư vấn giám sát",
     "PROJECT_MANAGEMENT": "Ban quản lý dự án",
 }
+
+# V6.2: tương thích dữ liệu phân quyền duyệt của các bản V6.0/V6.1 cũ.
+# Một số deployment đã dùng approval_group với mã chữ thường
+# (contractor/site_management/tvgs/bqlda), trong khi bản mới dùng
+# approval_role với mã chữ hoa. Mọi nơi trong app đều quy về một chuẩn.
+_APPROVAL_ROLE_ALIASES = {
+    "": "",
+    "NONE": "",
+    "CONTRACTOR": "CONTRACTOR",
+    "SITE_MANAGEMENT": "SITE_MANAGEMENT",
+    "EXECUTIVE": "SITE_MANAGEMENT",
+    "BAN_DIEU_HANH": "SITE_MANAGEMENT",
+    "CONSULTANT": "CONSULTANT",
+    "TVGS": "CONSULTANT",
+    "SUPERVISION": "CONSULTANT",
+    "PROJECT_MANAGEMENT": "PROJECT_MANAGEMENT",
+    "BQLDA": "PROJECT_MANAGEMENT",
+    "PMB": "PROJECT_MANAGEMENT",
+}
+
+def _normalize_approval_role(value) -> str:
+    raw = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    return _APPROVAL_ROLE_ALIASES.get(raw, raw if raw in APPROVAL_ROLE_LABELS else "")
+
+def _user_approval_role(user: dict | None) -> str:
+    u = dict(user or {})
+    role = _normalize_approval_role(u.get("approval_role") or u.get("approval_group") or "")
+    # Admin được xem là cấp Ban QLDA khi dữ liệu cũ chưa có trường phân loại duyệt.
+    # Điều này giữ đúng quyền quản trị/phê duyệt và tự sửa hiển thị "Không tham gia duyệt"
+    # ở các tài khoản Admin được tạo từ deployment cũ.
+    if not role and str(u.get("role") or "").strip().lower() == "admin":
+        return "PROJECT_MANAGEMENT"
+    return role
+
 APPROVAL_ELIGIBLE_DOCS = {"RFA", "RFI"}
 APPROVAL_ELIGIBLE_DRAWINGS = {"SHOPDRAWING", "AS_BUILT"}
 
@@ -809,18 +843,18 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
     identity = _cloud_identity()
     email = str(identity.get("email") or "").lower()
     display_name = str(identity.get("name") or "")
-    approval_role = str(identity.get("approval_role") or "")
+    approval_role = _user_approval_role(identity)
     wf = db.approval_workflow(pid, record_kind, subtype, record_id)
 
     if not wf:
         users = _approval_users()
         by_role = {}
         for u in users:
-            ar = str(u.get("approval_role") or "")
+            ar = _user_approval_role(u)
             if ar:
                 by_role.setdefault(ar, []).append(u)
 
-        contractor_ok = approval_role == "CONTRACTOR" or _is_admin()
+        contractor_ok = approval_role == "CONTRACTOR"
         if not contractor_ok:
             st.info("Hồ sơ chưa được Nhà thầu trình duyệt.")
             return
@@ -895,40 +929,60 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
                 st.caption(person)
             st.write(status)
 
-    with st.expander("🕘 Lịch sử phê duyệt", expanded=False):
-        history = db.approval_history(int(wf["id"]))
-        if history:
-            action_labels = {
-                "SUBMIT": "Trình duyệt",
-                "RESUBMIT": "Trình lại",
-                "APPROVE": "Phê duyệt",
-                "REQUEST_REVISION": "Yêu cầu chỉnh sửa",
-                "COMPLETE": "Hoàn tất",
+    history = db.approval_history(int(wf["id"]))
+    action_labels = {
+        "SUBMIT": "Trình duyệt",
+        "RESUBMIT": "Trình lại",
+        "APPROVE": "Phê duyệt",
+        "REQUEST_REVISION": "Yêu cầu chỉnh sửa",
+        "COMPLETE": "Hoàn tất",
+    }
+    reviewer_role = approval_role in {"SITE_MANAGEMENT", "CONSULTANT", "PROJECT_MANAGEMENT"}
+    if reviewer_role:
+        st.markdown("#### 📝 Ý kiến / Kết quả phê duyệt")
+        approval_rows = [
+            {
+                "Thời điểm": h["created_at"],
+                "Cấp duyệt": h["stage_label"],
+                "Người duyệt": h["actor_name"] or h["actor_email"],
+                "Kết quả": action_labels.get(str(h["action"]), h["action"]),
+                "Ý kiến": h["comment"],
             }
-            st.dataframe(
-                pd.DataFrame([
-                    {
-                        "Thời điểm": h["created_at"],
-                        "Lần chỉnh sửa": int(h["revision_no"] or 0),
-                        "Cấp xử lý": h["stage_label"],
-                        "Hành động": action_labels.get(str(h["action"]), h["action"]),
-                        "Người thao tác": h["actor_name"] or h["actor_email"],
-                        "Trạng thái": h["status"],
-                        "Ý kiến": h["comment"],
-                    }
-                    for h in history
-                ]),
-                hide_index=True,
-                width="stretch",
-            )
+            for h in history
+            if str(h["action"] or "") in {"APPROVE", "REQUEST_REVISION", "COMPLETE"}
+               or str(h["comment"] or "").strip()
+        ]
+        if approval_rows:
+            st.dataframe(pd.DataFrame(approval_rows), hide_index=True, width="stretch")
         else:
-            st.caption("Chưa có lịch sử thao tác.")
+            st.info("Chưa có ý kiến/kết quả phê duyệt.")
+    else:
+        with st.expander("🕘 Lịch sử phê duyệt", expanded=False):
+            if history:
+                st.dataframe(
+                    pd.DataFrame([
+                        {
+                            "Thời điểm": h["created_at"],
+                            "Lần chỉnh sửa": int(h["revision_no"] or 0),
+                            "Cấp xử lý": h["stage_label"],
+                            "Hành động": action_labels.get(str(h["action"]), h["action"]),
+                            "Người thao tác": h["actor_name"] or h["actor_email"],
+                            "Trạng thái": h["status"],
+                            "Ý kiến": h["comment"],
+                        }
+                        for h in history
+                    ]),
+                    hide_index=True,
+                    width="stretch",
+                )
+            else:
+                st.caption("Chưa có lịch sử thao tác.")
 
     current_step = next((x for x in steps if str(x["stage_code"]) == current_stage), None)
     if current_step and current_stage not in {"DONE", "CONTRACTOR"} and str(current_step["approver_email"] or "").lower() == email:
         st.markdown(f"#### Xử lý tại bước: {current_step['stage_label']}")
         comment = st.text_area(
-            "Ý kiến / Comment của người duyệt",
+            "Ý kiến / Kết quả phê duyệt",
             key=f"approval_comment_{wf['id']}_{current_stage}_{revision_no}",
             placeholder="Có thể nhập ý kiến khi phê duyệt; bắt buộc nhập khi yêu cầu chỉnh sửa.",
         )
@@ -949,13 +1003,18 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
                 _send_approval_notice(result.get("next_email", ""), record_code, record_title, result.get("status", ""), comment)
                 st.rerun()
 
-    elif current_stage == "CONTRACTOR" and (approval_role == "CONTRACTOR" or _is_admin()):
+    elif current_stage == "CONTRACTOR" and approval_role == "CONTRACTOR":
         return_stage = str(wf["return_stage"] or "SITE_MANAGEMENT")
         return_label = APPROVAL_ROLE_LABELS.get(return_stage, return_stage)
-        st.warning(
+        revision_comments = [h for h in history if str(h["action"] or "") == "REQUEST_REVISION" and str(h["comment"] or "").strip()]
+        latest_comment = str(revision_comments[-1]["comment"] or "").strip() if revision_comments else ""
+        message = (
             f"Hồ sơ đang chờ Nhà thầu chỉnh sửa theo ý kiến của **{return_label}**. "
             f"Sau khi cập nhật nội dung/file, bấm Trình lại để gửi thẳng về {return_label}."
         )
+        if latest_comment:
+            message += f"\n\n**Ý kiến cần xử lý:** {latest_comment}"
+        st.warning(message)
         if st.button("🔄 Trình lại sau chỉnh sửa", type="primary", key=f"resubmit_{wf['id']}_{revision_no}"):
             result = db.resubmit_approval_workflow(int(wf["id"]), email, submitted_name=display_name)
             _send_approval_notice(
@@ -973,7 +1032,349 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
             f"{current_step['approver_name'] or current_step['approver_email'] or 'chưa xác định người duyệt'}."
         )
 
+
+def _render_approval_document_type(pid: int, doc_type: str):
+    """V6.3: giao diện RFA/RFI theo vai trò.
+
+    - Nhà thầu: chỉ nhập dữ liệu trình duyệt cốt lõi.
+    - Ban điều hành/TVGS/Ban QLDA: xem dữ liệu gốc, chỉ thao tác phần phê duyệt.
+    - Quyền hệ thống Update/Admin: có nút riêng để tải file lên kho Drive.
+    """
+    cfg = DOC_CONFIG[doc_type]
+    rows = db.documents(pid, doc_type)
+    total = len(rows)
+    overdue = sum(1 for r in rows if document_deadline_label(r, doc_type).startswith("Quá hạn"))
+    completed = 0
+    for r in rows:
+        wf = db.approval_workflow(pid, "document", doc_type, int(r["id"]))
+        if wf and str(wf["current_stage"] or "") == "DONE":
+            completed += 1
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Tổng hồ sơ", total)
+    c2.metric("Quá hạn", overdue)
+    c3.metric("Đã phê duyệt", completed)
+
+    identity = _cloud_identity()
+    approval_role = _user_approval_role(identity)
+    is_contractor = approval_role == "CONTRACTOR"
+    is_reviewer = approval_role in {"SITE_MANAGEMENT", "CONSULTANT", "PROJECT_MANAGEMENT"}
+    can_edit_submission = bool(_can_update() and is_contractor)
+    can_upload_storage = _can_update()
+
+    options = [int(r["id"]) for r in rows]
+    if can_edit_submission:
+        options = [None] + options
+
+    select_key = f"doc_select_{pid}_{doc_type}"
+    pending_key = select_key + "_pending"
+    pending = st.session_state.pop(pending_key, None)
+    if pending in options:
+        st.session_state[select_key] = pending
+
+    if not options:
+        if can_edit_submission:
+            options = [None]
+        else:
+            st.info("Chưa có hồ sơ để xem hoặc xử lý.")
+            return
+
+    if is_contractor:
+        select_label = "Chọn hồ sơ để tạo / cập nhật"
+    elif is_reviewer:
+        select_label = "Chọn hồ sơ để xem / phê duyệt"
+    elif can_upload_storage:
+        select_label = "Chọn hồ sơ để xem / tải file lên lưu"
+    else:
+        select_label = "Chọn hồ sơ để xem"
+
+    selected = st.selectbox(
+        select_label,
+        options,
+        format_func=lambda x: "➕ Thêm mới" if x is None else f"#{x} - {next(r['code'] for r in rows if int(r['id'])==int(x))}",
+        key=select_key,
+    )
+    record = db.document(selected) if selected else None
+
+    flash_key = f"flash_doc_{pid}_{doc_type}"
+    if flash_key in st.session_state:
+        st.success(st.session_state.pop(flash_key))
+    error_flash = flash_key + "_error"
+    if error_flash in st.session_state:
+        st.error(st.session_state.pop(error_flash))
+
+    # --------- Phần thông tin chung: cùng bố cục, khác quyền sửa ---------
+    if can_edit_submission:
+        with st.form(f"approval_doc_form_{pid}_{doc_type}_{selected or 'new'}"):
+            c1, c2 = st.columns([1, 2])
+            code = c1.text_input(
+                cfg.get("code_label", f"Mã {doc_type} *"),
+                value=(record["code"] if record else ""),
+                placeholder="S2-MEP-001",
+            )
+            subject = c2.text_input(f"{cfg['subject']} *", value=(record["subject"] if record else ""))
+
+            c1, c2, c3 = st.columns(3)
+            discipline = c1.text_input("Bộ môn / Hệ", value=(record["discipline"] if record else ""))
+            contractor = c2.text_input("Nhà thầu / Đơn vị", value=(record["contractor"] if record else ""))
+            priority_default = PRIORITIES.index(record["priority"]) if record and record["priority"] in PRIORITIES else 1
+            priority = c3.selectbox("Mức độ", PRIORITIES, index=priority_default)
+
+            c1, c2, c3 = st.columns(3)
+            issuer_default = record["issuer"] if record else str(identity.get("name") or identity.get("email") or "")
+            issuer = c1.text_input(cfg.get("issuer_label", "Người trình"), value=issuer_default)
+            issue_date = c2.date_input(
+                cfg.get("issue_date_label", "Ngày trình"),
+                value=parse_date(record["issue_date"], date.today()) if record else date.today(),
+            )
+            due_date = c3.date_input(
+                cfg.get("due_date_label", "Hạn xử lý"),
+                value=parse_date(record["due_date"], date.today()+timedelta(days=7)) if record else date.today()+timedelta(days=7),
+            )
+            description = st.text_area("Mô tả", value=(record["description"] if record else ""), height=120)
+
+            save_clicked = st.form_submit_button("💾 Lưu hồ sơ", type="primary", width="stretch")
+
+        if save_clicked:
+            normalized_code = _normalize_execution_code(code)
+            if not normalized_code or not subject.strip():
+                st.error("Mã hồ sơ và nội dung trình duyệt là bắt buộc.")
+            elif not _valid_execution_code(normalized_code):
+                st.error("Mã phải theo định dạng THÁP-BỘMÔN-STT, ví dụ S2-MEP-001.")
+            else:
+                try:
+                    # Các trường không còn cho nhập ở RFA/RFI được giữ nguyên khi cập nhật.
+                    current_status = record["status"] if record else (cfg["statuses"][0] if cfg.get("statuses") else "Soạn thảo")
+                    doc_id = db.save_document(pid, doc_type, {
+                        "code": normalized_code,
+                        "subject": subject,
+                        "discipline": discipline.strip() or _discipline_from_code(normalized_code),
+                        "contractor": contractor,
+                        "issuer": issuer,
+                        "assignee": record["assignee"] if record else "",
+                        "issue_date": iso(issue_date),
+                        "due_date": iso(due_date),
+                        "closed_date": record["closed_date"] if record else "",
+                        "status": current_status,
+                        "priority": priority,
+                        "related_wbs": record["related_wbs"] if record else "",
+                        "description": description,
+                        "response": record["response"] if record else "",
+                        "note": record["note"] if record and "note" in record.keys() else "",
+                        "cost_impact": float(record["cost_impact"] or 0) if record and "cost_impact" in record.keys() else 0.0,
+                        "time_impact_days": int(record["time_impact_days"] or 0) if record and "time_impact_days" in record.keys() else 0,
+                    }, selected)
+                    st.session_state[pending_key] = doc_id
+                    st.session_state[flash_key] = "Đã lưu hồ sơ."
+                    st.rerun()
+                except sqlite3.IntegrityError:
+                    st.error(f"Mã {doc_type} đã tồn tại trong dự án.")
+    elif record:
+        # Người duyệt / người chỉ tải file: cùng thông tin nhưng không được sửa dữ liệu Nhà thầu đã trình.
+        st.markdown("#### Nội dung hồ sơ")
+        c1, c2 = st.columns([1, 2])
+        c1.text_input(cfg.get("code_label", f"Mã {doc_type} *"), value=str(record["code"] or ""), disabled=True, key=f"view_code_{pid}_{doc_type}_{selected}")
+        c2.text_input(f"{cfg['subject']} *", value=str(record["subject"] or ""), disabled=True, key=f"view_subject_{pid}_{doc_type}_{selected}")
+
+        c1, c2, c3 = st.columns(3)
+        c1.text_input("Bộ môn / Hệ", value=str(record["discipline"] or ""), disabled=True, key=f"view_disc_{pid}_{doc_type}_{selected}")
+        c2.text_input("Nhà thầu / Đơn vị", value=str(record["contractor"] or ""), disabled=True, key=f"view_contractor_{pid}_{doc_type}_{selected}")
+        c3.text_input("Mức độ", value=str(record["priority"] or ""), disabled=True, key=f"view_priority_{pid}_{doc_type}_{selected}")
+
+        c1, c2, c3 = st.columns(3)
+        c1.text_input(cfg.get("issuer_label", "Người trình"), value=str(record["issuer"] or ""), disabled=True, key=f"view_issuer_{pid}_{doc_type}_{selected}")
+        c2.text_input(cfg.get("issue_date_label", "Ngày trình"), value=str(record["issue_date"] or ""), disabled=True, key=f"view_issue_{pid}_{doc_type}_{selected}")
+        c3.text_input(cfg.get("due_date_label", "Hạn xử lý"), value=str(record["due_date"] or ""), disabled=True, key=f"view_due_{pid}_{doc_type}_{selected}")
+        st.text_area("Mô tả", value=str(record["description"] or ""), disabled=True, height=120, key=f"view_description_{pid}_{doc_type}_{selected}")
+
+    # --------- Upload lưu trữ tách riêng khỏi quyền Nhà thầu / quyền duyệt ---------
+    if selected:
+        current = db.document(selected)
+        if current:
+            panel_key = f"v6_doc_attach_{pid}_{doc_type}_{selected}"
+            if can_upload_storage:
+                if st.button(
+                    "📤 Tải file lên lưu",
+                    key=f"approval_doc_upload_{pid}_{doc_type}_{selected}",
+                    width="stretch",
+                ):
+                    try:
+                        st.session_state.pop(panel_key + "_ticket", None)
+                        st.session_state.pop(panel_key + "_upload_open", None)
+                        _prepare_inline_upload_ticket(
+                            pid,
+                            kind="document",
+                            subtype=doc_type,
+                            record_code=str(current["code"] or ""),
+                            panel_key=panel_key,
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Chưa mở được vùng tải file: {exc}")
+
+            _render_inline_drive_attachments(
+                pid,
+                kind="document",
+                subtype=doc_type,
+                record_code=str(current["code"] or ""),
+                record_id=int(selected),
+                panel_key=panel_key,
+            )
+
+            if is_contractor or is_reviewer:
+                _render_online_approval(
+                    pid,
+                    "document",
+                    doc_type,
+                    int(selected),
+                    str(current["code"] or ""),
+                    str(current["subject"] or ""),
+                )
+
+    # --------- Danh sách hồ sơ: chỉ các cột cần thiết cho RFA/RFI ---------
+    if rows:
+        drive_counts = _record_drive_counts(pid, kind="document", subtype=doc_type, record_codes=[r["code"] for r in rows])
+        fc1, fc2, fc3, fc4, fc5 = st.columns([2.2, 1.0, 1.25, 1.35, 1.05])
+        filter_text = fc1.text_input("Tìm mã / nội dung / đơn vị", key=f"doc_filter_text_{pid}_{doc_type}")
+        towers = sorted({_tower_from_code(r["code"]) for r in rows if str(r["code"] or "").strip()})
+        disciplines = sorted({str(r["discipline"] or "").strip() for r in rows if str(r["discipline"] or "").strip()})
+        approval_states = []
+        workflow_cache = {}
+        for r in rows:
+            wf = db.approval_workflow(pid, "document", doc_type, int(r["id"]))
+            workflow_cache[int(r["id"])] = wf
+            approval_states.append(str(wf["overall_status"] or "Chưa trình duyệt") if wf else "Chưa trình duyệt")
+        approval_states = sorted(set(approval_states))
+        filter_tower = fc2.selectbox("Tháp", ["Tất cả"] + towers, key=f"doc_filter_tower_{pid}_{doc_type}")
+        filter_discipline = fc3.selectbox("Bộ môn/Hệ", ["Tất cả"] + disciplines, key=f"doc_filter_disc_{pid}_{doc_type}")
+        filter_status = fc4.selectbox("Trạng thái duyệt", ["Tất cả"] + approval_states, key=f"doc_filter_status_{pid}_{doc_type}")
+        filter_file = fc5.selectbox("Tệp", ["Tất cả", "Có file", "Chưa có file"], key=f"doc_filter_file_{pid}_{doc_type}")
+
+        q = filter_text.strip().lower()
+        table_rows = []
+        visible_row_ids = []
+        for r in rows:
+            rid = int(r["id"])
+            code_value = str(r["code"] or "")
+            info = drive_counts.get(code_value, {})
+            total_files = int(info.get("count") or 0) + int(r["attachment_count"] or 0)
+            tower = _tower_from_code(code_value)
+            discipline_value = str(r["discipline"] or "").strip()
+            wf = workflow_cache.get(rid)
+            approval_state = str(wf["overall_status"] or "Chưa trình duyệt") if wf else "Chưa trình duyệt"
+            haystack = " ".join([
+                code_value,
+                str(r["subject"] or ""),
+                discipline_value,
+                str(r["contractor"] or ""),
+                str(r["issuer"] or ""),
+            ]).lower()
+            if q and q not in haystack:
+                continue
+            if filter_tower != "Tất cả" and tower != filter_tower:
+                continue
+            if filter_discipline != "Tất cả" and discipline_value != filter_discipline:
+                continue
+            if filter_status != "Tất cả" and approval_state != filter_status:
+                continue
+            if not _file_filter_match(total_files, filter_file):
+                continue
+            file_label = f"✅ Có file ({total_files})" if total_files else "—"
+            table_rows.append({
+                "Chọn": False,
+                "ID": rid,
+                "Tháp": tower,
+                "Mã": code_value,
+                "Nội dung": r["subject"],
+                "Bộ môn": discipline_value,
+                "Nhà thầu": r["contractor"],
+                "Mức độ": r["priority"],
+                "Người trình": r["issuer"],
+                "Ngày trình": r["issue_date"],
+                "Hạn xử lý": r["due_date"],
+                "Duyệt online": approval_state,
+                "File DB": file_label,
+            })
+            visible_row_ids.append(rid)
+
+        if not table_rows:
+            st.info("Không có hồ sơ phù hợp bộ lọc.")
+            return
+
+        df = pd.DataFrame(table_rows)
+        disabled_cols = [c for c in df.columns if c != "Chọn"]
+        edited = st.data_editor(
+            df,
+            hide_index=True,
+            width="stretch",
+            key=f"doc_select_grid_{pid}_{doc_type}_{len(visible_row_ids)}_{sum(visible_row_ids)}_{abs(hash((filter_text, filter_tower, filter_discipline, filter_status, filter_file))) % 100000}",
+            disabled=disabled_cols,
+            column_config={"Chọn": st.column_config.CheckboxColumn("☑ Chọn", default=False)},
+        )
+        selected_ids = [int(v) for v in edited.loc[edited["Chọn"] == True, "ID"].tolist()]
+        download_state_key = f"doc_download_selected_state_{pid}_{doc_type}"
+        d1, d2, d3 = st.columns([1.45, 1.35, 2.1])
+        if d1.button(
+            f"⬇️ Tải hồ sơ đã chọn ({len(selected_ids)})",
+            key=f"doc_download_selected_{pid}_{doc_type}",
+            disabled=not selected_ids,
+            type="primary",
+            width="stretch",
+        ):
+            st.session_state[download_state_key] = list(selected_ids)
+
+        if d3.button(
+            "📝 Mở / xử lý hồ sơ",
+            key=f"doc_open_selected_{pid}_{doc_type}",
+            disabled=len(selected_ids) != 1,
+            width="stretch",
+        ):
+            st.session_state[pending_key] = int(selected_ids[0])
+            st.rerun()
+
+        if d2.button(
+            f"🗑 Xóa hồ sơ đã chọn ({len(selected_ids)})",
+            key=f"doc_delete_selected_{pid}_{doc_type}",
+            disabled=(not _is_admin()) or not selected_ids,
+            width="stretch",
+        ):
+            errors = []
+            deleted = 0
+            for rid in selected_ids:
+                row = db.document(rid)
+                if not row:
+                    continue
+                _, drive_errors = _trash_record_drive_files(pid, kind="document", subtype=doc_type, record_code=str(row["code"] or ""))
+                if drive_errors:
+                    errors.append(f"#{rid}: " + " | ".join(drive_errors))
+                    continue
+                db.delete_document(rid)
+                deleted += 1
+            if selected in selected_ids:
+                st.session_state[pending_key] = None
+            st.session_state.pop(download_state_key, None)
+            if deleted:
+                st.success(f"Đã xóa {deleted} hồ sơ đã chọn.")
+            if errors:
+                st.error("Một số hồ sơ chưa xóa được vì lỗi Google Drive: " + " || ".join(errors))
+            st.rerun()
+
+        download_ids = [int(x) for x in (st.session_state.get(download_state_key) or [])]
+        if download_ids:
+            _render_selected_document_downloads(pid, doc_type, download_ids, download_state_key)
+        export_df = df.drop(columns=["Chọn"])
+        st.download_button(
+            f"⬇️ Xuất {doc_type} Excel",
+            to_excel_bytes(export_df, doc_type),
+            file_name=f"{doc_type}_{date.today():%Y%m%d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"doc_xlsx_{pid}_{doc_type}",
+        )
+
 def render_document_type(pid: int, doc_type: str):
+    if doc_type in APPROVAL_ELIGIBLE_DOCS:
+        return _render_approval_document_type(pid, doc_type)
+
     cfg = DOC_CONFIG[doc_type]
     rows = db.documents(pid, doc_type)
     total = len(rows)
@@ -1149,7 +1550,7 @@ def render_document_type(pid: int, doc_type: str):
                 "Chọn": False, "ID": r["id"], "Tháp": tower, "Mã": code_value, "Nội dung": r["subject"], "Bộ môn": discipline_value,
                 "Nhà thầu": r["contractor"], "Phát hành": r["issue_date"], "Hạn": r["due_date"],
                 "Trạng thái": status_value, "Mức độ": r["priority"], "Theo dõi hạn": document_deadline_label(r, doc_type),
-                "WBS/Task": r["related_wbs"], "Ghi chú": r["note"], "Duyệt online": (db.approval_workflow(pid, "document", doc_type, int(r["id"]))["overall_status"] if db.approval_workflow(pid, "document", doc_type, int(r["id"])) else "—") if doc_type in APPROVAL_ELIGIBLE_DOCS else "—", "File DB": file_label,
+                "WBS/Task": r["related_wbs"], "Ghi chú": r["note"], "Duyệt online": (db.approval_workflow(pid, "drawing", drawing_type, int(r["id"]))["overall_status"] if db.approval_workflow(pid, "drawing", drawing_type, int(r["id"])) else "—") if drawing_type in APPROVAL_ELIGIBLE_DRAWINGS else "—", "File DB": file_label,
             })
             visible_row_ids.append(int(r["id"]))
         if not table_rows:
@@ -1376,7 +1777,400 @@ def _render_selected_document_downloads(pid: int, doc_type: str, selected_ids: l
         panel_key=panel_key,
     )
 
+def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING"):
+    """V6.4: Shopdrawing dùng cùng giao diện phân vai như RFA/RFI.
+
+    - Nhà thầu: tạo/cập nhật phần dữ liệu trình duyệt.
+    - Ban điều hành/TVGS/Ban QLDA: chỉ xem dữ liệu gốc và xử lý phê duyệt.
+    - Quyền hệ thống Update/Admin: có nút riêng để tải file lên lưu trữ.
+    """
+    rows = db.drawings(pid, drawing_type)
+    workflow_cache = {
+        int(r["id"]): db.approval_workflow(pid, "drawing", drawing_type, int(r["id"]))
+        for r in rows
+    }
+    total = len(rows)
+    approved = sum(1 for wf in workflow_cache.values() if wf and str(wf["current_stage"] or "") == "DONE")
+    need_revision = sum(
+        1 for wf in workflow_cache.values()
+        if wf and str(wf["current_stage"] or "") == "CONTRACTOR" and int(wf["revision_no"] or 0) > 0
+    )
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Tổng Shopdrawing", total)
+    c2.metric("Đã phê duyệt", approved)
+    c3.metric("Cần chỉnh sửa", need_revision)
+
+    identity = _cloud_identity()
+    approval_role = _user_approval_role(identity)
+    is_contractor = approval_role == "CONTRACTOR"
+    is_reviewer = approval_role in {"SITE_MANAGEMENT", "CONSULTANT", "PROJECT_MANAGEMENT"}
+    can_edit_submission = bool(_can_update() and is_contractor)
+    can_upload_storage = _can_update()
+
+    options = [int(r["id"]) for r in rows]
+    if can_edit_submission:
+        options = [None] + options
+
+    select_key = f"drawing_select_{pid}_{drawing_type}"
+    pending_key = select_key + "_pending"
+    pending = st.session_state.pop(pending_key, None)
+    if pending in options:
+        st.session_state[select_key] = pending
+
+    if not options:
+        if can_edit_submission:
+            options = [None]
+        else:
+            st.info("Chưa có Shopdrawing để xem hoặc xử lý.")
+            return
+
+    if is_contractor:
+        select_label = "Chọn Shopdrawing để tạo / cập nhật"
+    elif is_reviewer:
+        select_label = "Chọn Shopdrawing để xem / phê duyệt"
+    elif can_upload_storage:
+        select_label = "Chọn Shopdrawing để xem / tải file lên lưu"
+    else:
+        select_label = "Chọn Shopdrawing để xem"
+
+    selected = st.selectbox(
+        select_label,
+        options,
+        format_func=lambda x: "➕ Thêm mới" if x is None else (
+            f"#{x} - {next(r['drawing_no'] for r in rows if int(r['id']) == int(x))} "
+            f"Rev.{next((r['revision'] or '-') for r in rows if int(r['id']) == int(x))}"
+        ),
+        key=select_key,
+    )
+    record = db.drawing(selected) if selected else None
+
+    flash_key = f"flash_drawing_{pid}_{drawing_type}"
+    if flash_key in st.session_state:
+        st.success(st.session_state.pop(flash_key))
+    error_flash = flash_key + "_error"
+    if error_flash in st.session_state:
+        st.error(st.session_state.pop(error_flash))
+
+    # --------- Nội dung Shopdrawing: cùng bố cục, phân quyền sửa theo vai trò ---------
+    if can_edit_submission:
+        with st.form(f"approval_drawing_form_{pid}_{drawing_type}_{selected or 'new'}"):
+            c1, c2 = st.columns([1, 2])
+            number = c1.text_input(
+                "Mã Shopdrawing *",
+                value=(record["drawing_no"] if record else ""),
+                placeholder="S2-MEP-001",
+            )
+            title = c2.text_input(
+                "Nội dung trình duyệt / Tên bản vẽ *",
+                value=(record["title"] if record else ""),
+            )
+
+            c1, c2, c3 = st.columns(3)
+            discipline = c1.text_input("Bộ môn / Hệ", value=(record["discipline"] if record else ""))
+            contractor = c2.text_input("Nhà thầu / Đơn vị", value=(record["issuer"] if record else ""))
+            priority_value = str(record["priority"] or "") if record and "priority" in record.keys() else ""
+            priority_default = PRIORITIES.index(priority_value) if priority_value in PRIORITIES else 1
+            priority = c3.selectbox("Mức độ", PRIORITIES, index=priority_default)
+
+            c1, c2 = st.columns(2)
+            revision = c1.text_input("Revision", value=(record["revision"] if record else ""), placeholder="Rev.00 / A / C01")
+            submitter_default = record["receiver"] if record else str(identity.get("name") or identity.get("email") or "")
+            submitter = c2.text_input("Người trình", value=submitter_default)
+
+            c1, c2 = st.columns(2)
+            submitted_date = c1.date_input(
+                "Ngày trình",
+                value=parse_date(record["received_date"], date.today()) if record else date.today(),
+            )
+            due_date_value = record["due_date"] if record and "due_date" in record.keys() else ""
+            due_date = c2.date_input(
+                "Hạn xử lý",
+                value=parse_date(due_date_value, date.today() + timedelta(days=7)) if record else date.today() + timedelta(days=7),
+            )
+            description_value = record["description"] if record and "description" in record.keys() else ""
+            description = st.text_area("Mô tả", value=description_value, height=120)
+            save_clicked = st.form_submit_button("💾 Lưu Shopdrawing", type="primary", width="stretch")
+
+        if save_clicked:
+            normalized_number = _normalize_execution_code(number)
+            if not normalized_number or not title.strip():
+                st.error("Mã Shopdrawing và nội dung trình duyệt là bắt buộc.")
+            elif not _valid_execution_code(normalized_number):
+                st.error("Mã phải theo định dạng THÁP-BỘMÔN-STT, ví dụ S2-MEP-001.")
+            else:
+                try:
+                    drawing_id = db.save_drawing(pid, drawing_type, {
+                        "drawing_no": normalized_number,
+                        "title": title,
+                        "discipline": discipline.strip() or _discipline_from_code(normalized_number),
+                        "revision": revision,
+                        "issuer": contractor,
+                        "receiver": submitter,
+                        "received_date": iso(submitted_date),
+                        "issue_date": record["issue_date"] if record else "",
+                        "due_date": iso(due_date),
+                        "priority": priority,
+                        "description": description,
+                        "status": record["status"] if record else "Mới nhận",
+                        "related_wbs": record["related_wbs"] if record else "",
+                        "reference_no": record["reference_no"] if record else "",
+                        "note": record["note"] if record else "",
+                    }, selected)
+                    st.session_state[pending_key] = drawing_id
+                    st.session_state[flash_key] = "Đã lưu Shopdrawing."
+                    st.rerun()
+                except sqlite3.IntegrityError:
+                    st.error("Mã Shopdrawing + Revision này đã tồn tại trong dự án.")
+    elif record:
+        st.markdown("#### Nội dung Shopdrawing")
+        c1, c2 = st.columns([1, 2])
+        c1.text_input("Mã Shopdrawing *", value=str(record["drawing_no"] or ""), disabled=True, key=f"view_sd_no_{pid}_{selected}")
+        c2.text_input("Nội dung trình duyệt / Tên bản vẽ *", value=str(record["title"] or ""), disabled=True, key=f"view_sd_title_{pid}_{selected}")
+
+        c1, c2, c3 = st.columns(3)
+        c1.text_input("Bộ môn / Hệ", value=str(record["discipline"] or ""), disabled=True, key=f"view_sd_disc_{pid}_{selected}")
+        c2.text_input("Nhà thầu / Đơn vị", value=str(record["issuer"] or ""), disabled=True, key=f"view_sd_contractor_{pid}_{selected}")
+        priority_value = str(record["priority"] or "") if "priority" in record.keys() else ""
+        c3.text_input("Mức độ", value=priority_value, disabled=True, key=f"view_sd_priority_{pid}_{selected}")
+
+        c1, c2 = st.columns(2)
+        c1.text_input("Revision", value=str(record["revision"] or ""), disabled=True, key=f"view_sd_rev_{pid}_{selected}")
+        c2.text_input("Người trình", value=str(record["receiver"] or ""), disabled=True, key=f"view_sd_submitter_{pid}_{selected}")
+
+        c1, c2 = st.columns(2)
+        c1.text_input("Ngày trình", value=str(record["received_date"] or ""), disabled=True, key=f"view_sd_date_{pid}_{selected}")
+        due_value = str(record["due_date"] or "") if "due_date" in record.keys() else ""
+        c2.text_input("Hạn xử lý", value=due_value, disabled=True, key=f"view_sd_due_{pid}_{selected}")
+        description_value = str(record["description"] or "") if "description" in record.keys() else ""
+        st.text_area("Mô tả", value=description_value, disabled=True, height=120, key=f"view_sd_desc_{pid}_{selected}")
+
+    # --------- Upload lưu trữ độc lập với quyền phê duyệt ---------
+    if selected:
+        current = db.drawing(selected)
+        if current:
+            panel_key = f"v6_drawing_attach_{pid}_{drawing_type}_{selected}"
+            if can_upload_storage:
+                if st.button(
+                    "📤 Tải file lên lưu",
+                    key=f"approval_drawing_upload_{pid}_{drawing_type}_{selected}",
+                    width="stretch",
+                ):
+                    try:
+                        st.session_state.pop(panel_key + "_ticket", None)
+                        st.session_state.pop(panel_key + "_upload_open", None)
+                        _prepare_inline_upload_ticket(
+                            pid,
+                            kind="drawing",
+                            subtype=drawing_type,
+                            record_code=str(current["drawing_no"] or ""),
+                            panel_key=panel_key,
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Chưa mở được vùng tải file: {exc}")
+
+            _render_inline_drive_attachments(
+                pid,
+                kind="drawing",
+                subtype=drawing_type,
+                record_code=str(current["drawing_no"] or ""),
+                record_id=int(selected),
+                panel_key=panel_key,
+            )
+
+            if is_contractor or is_reviewer:
+                _render_online_approval(
+                    pid,
+                    "drawing",
+                    drawing_type,
+                    int(selected),
+                    str(current["drawing_no"] or ""),
+                    str(current["title"] or ""),
+                )
+
+        # Giữ tương thích file legacy từ các phiên bản trước.
+        arows = db.drawing_attachments(selected)
+        if arows:
+            st.markdown("**File legacy từ V4.x (nếu có)**")
+            legacy_delete = []
+            for a in arows:
+                c0, c1, c2 = st.columns([0.55, 5, 1.5])
+                marked = c0.checkbox("Xóa", key=f"legacy_shopdrawing_tick_{a['id']}", disabled=not _is_admin(), label_visibility="collapsed")
+                content = bytes(a["file_content"] or b"")
+                if content:
+                    c1.download_button(
+                        f"⬇️ {a['file_name']}", content, file_name=a["file_name"],
+                        mime=a["mime_type"] or "application/octet-stream", key=f"shopdrawing_dl_{a['id']}"
+                    )
+                elif a["drive_web_url"]:
+                    c1.link_button(f"☁ {a['file_name']}", a["drive_web_url"])
+                    if a["drive_file_id"]:
+                        c2.link_button("⬇️ Tải xuống", f"https://drive.google.com/uc?export=download&id={a['drive_file_id']}", width="stretch")
+                else:
+                    c1.write(a["file_name"])
+                if marked:
+                    legacy_delete.append(a)
+            if _is_admin() and st.button(
+                f"🗑 Xóa file legacy đã tick ({len(legacy_delete)})",
+                disabled=not legacy_delete,
+                key=f"legacy_shopdrawing_delete_{selected}",
+            ):
+                for a in legacy_delete:
+                    if a["drive_file_id"]:
+                        _trash_drive_file(a["drive_file_id"])
+                    db.delete_drawing_attachment(a["id"], selected)
+                st.rerun()
+
+    # --------- Danh sách Shopdrawing phục vụ chọn/xử lý/tải file ---------
+    if rows:
+        drive_counts = _record_drive_counts(
+            pid, kind="drawing", subtype=drawing_type, record_codes=[r["drawing_no"] for r in rows]
+        )
+        # Làm mới cache vì có thể vừa lưu/xử lý trong cùng session.
+        workflow_cache = {
+            int(r["id"]): db.approval_workflow(pid, "drawing", drawing_type, int(r["id"]))
+            for r in rows
+        }
+        fc1, fc2, fc3, fc4, fc5 = st.columns([2.2, 1.0, 1.25, 1.35, 1.05])
+        filter_text = fc1.text_input("Tìm mã / nội dung / đơn vị", key=f"drawing_filter_text_{pid}_{drawing_type}")
+        towers = sorted({_tower_from_code(r["drawing_no"]) for r in rows if str(r["drawing_no"] or "").strip()})
+        disciplines = sorted({str(r["discipline"] or "").strip() for r in rows if str(r["discipline"] or "").strip()})
+        approval_states = sorted(set(
+            str(workflow_cache[int(r["id"])]["overall_status"] or "Chưa trình duyệt")
+            if workflow_cache[int(r["id"])] else "Chưa trình duyệt"
+            for r in rows
+        ))
+        filter_tower = fc2.selectbox("Tháp", ["Tất cả"] + towers, key=f"drawing_filter_tower_{pid}_{drawing_type}")
+        filter_discipline = fc3.selectbox("Bộ môn/Hệ", ["Tất cả"] + disciplines, key=f"drawing_filter_disc_{pid}_{drawing_type}")
+        filter_status = fc4.selectbox("Trạng thái duyệt", ["Tất cả"] + approval_states, key=f"drawing_filter_status_{pid}_{drawing_type}")
+        filter_file = fc5.selectbox("Tệp", ["Tất cả", "Có file", "Chưa có file"], key=f"drawing_filter_file_{pid}_{drawing_type}")
+
+        q = filter_text.strip().lower()
+        table_rows = []
+        visible_row_ids = []
+        for r in rows:
+            rid = int(r["id"])
+            code_value = str(r["drawing_no"] or "")
+            info = drive_counts.get(code_value, {})
+            total_files = int(info.get("count") or 0) + int(r["attachment_count"] or 0)
+            tower = _tower_from_code(code_value)
+            discipline_value = str(r["discipline"] or "").strip()
+            wf = workflow_cache.get(rid)
+            approval_state = str(wf["overall_status"] or "Chưa trình duyệt") if wf else "Chưa trình duyệt"
+            haystack = " ".join([
+                code_value, str(r["title"] or ""), discipline_value,
+                str(r["issuer"] or ""), str(r["receiver"] or ""), str(r["revision"] or ""),
+            ]).lower()
+            if q and q not in haystack:
+                continue
+            if filter_tower != "Tất cả" and tower != filter_tower:
+                continue
+            if filter_discipline != "Tất cả" and discipline_value != filter_discipline:
+                continue
+            if filter_status != "Tất cả" and approval_state != filter_status:
+                continue
+            if not _file_filter_match(total_files, filter_file):
+                continue
+            file_label = f"✅ Có file ({total_files})" if total_files else "—"
+            table_rows.append({
+                "Chọn": False,
+                "ID": rid,
+                "Tháp": tower,
+                "Mã Shopdrawing": code_value,
+                "Nội dung": r["title"],
+                "Bộ môn": discipline_value,
+                "Revision": r["revision"],
+                "Nhà thầu": r["issuer"],
+                "Mức độ": (r["priority"] if "priority" in r.keys() else ""),
+                "Người trình": r["receiver"],
+                "Ngày trình": r["received_date"],
+                "Hạn xử lý": (r["due_date"] if "due_date" in r.keys() else ""),
+                "Duyệt online": approval_state,
+                "File DB": file_label,
+            })
+            visible_row_ids.append(rid)
+
+        if not table_rows:
+            st.info("Không có Shopdrawing phù hợp bộ lọc.")
+            return
+
+        df = pd.DataFrame(table_rows)
+        disabled_cols = [c for c in df.columns if c != "Chọn"]
+        edited = st.data_editor(
+            df,
+            hide_index=True,
+            width="stretch",
+            key=f"drawing_select_grid_{pid}_{drawing_type}_{len(visible_row_ids)}_{sum(visible_row_ids)}_{abs(hash((filter_text, filter_tower, filter_discipline, filter_status, filter_file))) % 100000}",
+            disabled=disabled_cols,
+            column_config={"Chọn": st.column_config.CheckboxColumn("☑ Chọn", default=False)},
+        )
+        selected_ids = [int(v) for v in edited.loc[edited["Chọn"] == True, "ID"].tolist()]
+        download_state_key = f"drawing_download_selected_state_{pid}_{drawing_type}"
+        d1, d2, d3 = st.columns([1.45, 1.35, 2.1])
+        if d1.button(
+            f"⬇️ Tải Shopdrawing đã chọn ({len(selected_ids)})",
+            key=f"drawing_download_selected_{pid}_{drawing_type}",
+            disabled=not selected_ids,
+            type="primary",
+            width="stretch",
+        ):
+            st.session_state[download_state_key] = list(selected_ids)
+
+        if d3.button(
+            "📝 Mở / xử lý Shopdrawing",
+            key=f"drawing_open_selected_{pid}_{drawing_type}",
+            disabled=len(selected_ids) != 1,
+            width="stretch",
+        ):
+            st.session_state[pending_key] = int(selected_ids[0])
+            st.rerun()
+
+        if d2.button(
+            f"🗑 Xóa Shopdrawing đã chọn ({len(selected_ids)})",
+            key=f"drawing_delete_selected_{pid}_{drawing_type}",
+            disabled=(not _is_admin()) or not selected_ids,
+            width="stretch",
+        ):
+            errors = []
+            deleted = 0
+            for rid in selected_ids:
+                row = db.drawing(rid)
+                if not row:
+                    continue
+                _, drive_errors = _trash_record_drive_files(
+                    pid, kind="drawing", subtype=drawing_type, record_code=str(row["drawing_no"] or "")
+                )
+                if drive_errors:
+                    errors.append(f"#{rid}: " + " | ".join(drive_errors))
+                    continue
+                db.delete_drawing(rid)
+                deleted += 1
+            if selected in selected_ids:
+                st.session_state[pending_key] = None
+            st.session_state.pop(download_state_key, None)
+            if deleted:
+                st.success(f"Đã xóa {deleted} Shopdrawing đã chọn.")
+            if errors:
+                st.error("Một số Shopdrawing chưa xóa được vì lỗi Google Drive: " + " || ".join(errors))
+            st.rerun()
+
+        download_ids = [int(x) for x in (st.session_state.get(download_state_key) or [])]
+        if download_ids:
+            _render_selected_drawing_downloads(pid, drawing_type, download_ids, download_state_key)
+        export_df = df.drop(columns=["Chọn"])
+        st.download_button(
+            "⬇️ Xuất Shopdrawing Excel",
+            to_excel_bytes(export_df, DRAWING_TYPES[drawing_type]),
+            file_name=f"{drawing_type}_{date.today():%Y%m%d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"drawing_xlsx_{pid}_{drawing_type}",
+        )
+
+
+
 def render_drawing_type(pid: int, drawing_type: str):
+    if drawing_type == "SHOPDRAWING":
+        return _render_approval_shopdrawing_type(pid, drawing_type)
     rows = db.drawings(pid, drawing_type)
     total = len(rows)
     approved = sum(1 for r in rows if r["status"] in {"Chấp thuận", "Chấp thuận có điều kiện"})
@@ -2432,7 +3226,7 @@ def _cloud_identity(refresh: bool = False):
             "role": role,
             "email": str(user.get("email") or ""),
             "name": str(user.get("name") or ""),
-            "approval_role": str(user.get("approval_role") or ""),
+            "approval_role": _user_approval_role(user),
             "label": {"read": "Chỉ đọc", "update": "Cập nhật", "admin": "Admin"}.get(role, "Chưa xác định"),
         }
         st.session_state["qlda_drive_identity"] = identity
@@ -2857,34 +3651,124 @@ def render_settings():
 
                 if ident.get("role") == "admin":
                     st.markdown("### 👥 Phân quyền người dùng")
-                    _ui_note("Chỉ đọc = Viewer Drive • Cập nhật = Viewer Drive + được thêm/sửa/upload qua app, KHÔNG được xóa • Admin = Editor Drive + toàn quyền quản trị/xóa trong app. Owner Drive vẫn là tài khoản đã deploy Apps Script.")
-                    with st.form("drive_user_form"):
-                        c1, c2 = st.columns(2)
-                        pemail = c1.text_input("Email người dùng")
-                        pname = c2.text_input("Tên người dùng")
-                        prole = c1.selectbox("Quyền", ["read", "update", "admin"], format_func=lambda x: {"read":"Chỉ đọc","update":"Cập nhật","admin":"Admin"}[x])
-                        papproval = c2.selectbox("Phân loại phê duyệt", ["", "CONTRACTOR", "SITE_MANAGEMENT", "CONSULTANT", "PROJECT_MANAGEMENT"], format_func=lambda x: APPROVAL_ROLE_LABELS.get(x, x))
-                        ppass = c2.text_input("Mật khẩu khởi tạo / mật khẩu mới (để trống nếu không đổi)", type="password")
-                        save_user = st.form_submit_button("Thêm / cập nhật người dùng", type="primary")
-                    if save_user:
-                        try:
-                            gw.set_user(token, pemail, pname, prole, ppass, papproval)
-                            st.success("Đã cập nhật người dùng và quyền Google Drive.")
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(str(exc))
+                    _ui_note("Chỉ đọc = Viewer Drive • Cập nhật = Viewer Drive + được thêm/sửa/upload qua app, KHÔNG được xóa • Admin = Editor Drive + toàn quyền quản trị/xóa trong app. Vai trò phê duyệt là lớp quyền riêng, dùng cho Nhà thầu/Ban điều hành/TVGS/Ban QLDA.")
 
+                    # Đọc danh sách TRƯỚC form để khi cập nhật người cũ, form luôn
+                    # hiện đúng quyền và phân loại duyệt hiện tại thay vì quay về mặc định.
                     try:
                         users = gw.list_users(token)
                     except Exception as exc:
                         users = []
                         st.error(str(exc))
+
+                    backend_has_approval_schema = bool(users) and any(
+                        ("approval_role" in u) or ("approval_group" in u) for u in users
+                    )
+                    if users and not backend_has_approval_schema:
+                        st.error(
+                            "⚠️ Google Apps Script đang chạy bản cũ, chưa trả về trường phân loại duyệt. "
+                            "Nếu bấm cập nhật, quyền hệ thống có thể đổi nhưng vai trò phê duyệt sẽ không được lưu. "
+                            "Hãy cập nhật `google_drive_appscript/Code.gs` bản V6.2 và Deploy New version."
+                        )
+
+                    approval_choices = ["", "CONTRACTOR", "SITE_MANAGEMENT", "CONSULTANT", "PROJECT_MANAGEMENT"]
+                    role_choices = ["read", "update", "admin"]
+                    mode = st.radio(
+                        "Thao tác người dùng",
+                        ["Cập nhật người dùng hiện có", "Thêm người dùng mới"],
+                        horizontal=True,
+                        key="drive_user_edit_mode",
+                    )
+
+                    selected_user = None
+                    if mode == "Cập nhật người dùng hiện có" and users:
+                        selected_email = st.selectbox(
+                            "Chọn người dùng cần cập nhật",
+                            [str(u.get("email") or "") for u in users],
+                            format_func=lambda e: next(
+                                (f"{u.get('name') or ''} • {u.get('email') or ''}" for u in users if str(u.get("email") or "") == e),
+                                e,
+                            ),
+                            key="drive_user_selected_email",
+                        )
+                        selected_user = next((u for u in users if str(u.get("email") or "") == selected_email), None)
+
+                    current_email = str((selected_user or {}).get("email") or "")
+                    current_name = str((selected_user or {}).get("name") or "")
+                    current_role = str((selected_user or {}).get("role") or "update")
+                    if current_role not in role_choices:
+                        current_role = "update"
+                    current_approval = _user_approval_role(selected_user)
+                    if current_approval not in approval_choices:
+                        current_approval = ""
+                    widget_suffix = (current_email or "new").replace("@", "_").replace(".", "_")
+
+                    with st.form(f"drive_user_form_{widget_suffix}"):
+                        c1, c2 = st.columns(2)
+                        pemail = c1.text_input(
+                            "Email người dùng",
+                            value=current_email,
+                            disabled=bool(selected_user),
+                        )
+                        pname = c2.text_input("Tên người dùng", value=current_name)
+                        prole = c1.selectbox(
+                            "Quyền hệ thống",
+                            role_choices,
+                            index=role_choices.index(current_role),
+                            format_func=lambda x: {"read":"Chỉ đọc","update":"Cập nhật","admin":"Admin"}[x],
+                        )
+                        papproval = c2.selectbox(
+                            "Phân loại phê duyệt",
+                            approval_choices,
+                            index=approval_choices.index(current_approval),
+                            format_func=lambda x: APPROVAL_ROLE_LABELS.get(x, x),
+                        )
+                        ppass = c2.text_input(
+                            "Mật khẩu khởi tạo / mật khẩu mới (để trống nếu không đổi)",
+                            type="password",
+                        )
+                        save_user = st.form_submit_button("💾 Lưu phân quyền người dùng", type="primary")
+
+                    if save_user:
+                        try:
+                            target_email = current_email if selected_user else pemail
+                            expected_approval = papproval or ("PROJECT_MANAGEMENT" if prole == "admin" else "")
+                            result = gw.set_user(token, target_email, pname, prole, ppass, papproval)
+                            saved = dict(result.get("user") or {})
+                            saved_role = _user_approval_role(saved)
+
+                            # Không báo thành công giả. Nếu backend cũ bỏ qua approval_role,
+                            # kiểm tra lại list_users và báo rõ phải deploy Apps Script mới.
+                            if saved_role != expected_approval:
+                                refreshed = gw.list_users(token)
+                                row = next(
+                                    (u for u in refreshed if str(u.get("email") or "").lower() == str(target_email or "").lower()),
+                                    {},
+                                )
+                                saved_role = _user_approval_role(row)
+                            if saved_role != expected_approval:
+                                st.error(
+                                    "Không lưu được **Phân loại phê duyệt** trên Google Apps Script. "
+                                    "Ứng dụng Railway đang mới hơn backend Apps Script. "
+                                    "Hãy thay `Code.gs` bằng bản V6.2 trong gói này và Deploy → Manage deployments → Edit → New version → Deploy."
+                                )
+                            else:
+                                if str(target_email or "").lower() == str(ident.get("email") or "").lower():
+                                    st.session_state.pop("qlda_drive_identity", None)
+                                st.success(
+                                    "Đã lưu người dùng: "
+                                    f"{APPROVAL_ROLE_LABELS.get(saved_role, saved_role) if saved_role else 'Không tham gia duyệt'}."
+                                )
+                                st.rerun()
+                        except Exception as exc:
+                            st.error(str(exc))
+
                     if users:
                         udf = pd.DataFrame([{
                             "Tên": u.get("name", ""),
                             "Email": u.get("email", ""),
+                            "Phân loại duyệt": APPROVAL_ROLE_LABELS.get(_user_approval_role(u), "Không tham gia duyệt"),
                             "Quyền": {"read":"Chỉ đọc","update":"Cập nhật","admin":"Admin"}.get(u.get("role", ""), u.get("role", "")),
-                            "Phân loại duyệt": APPROVAL_ROLE_LABELS.get(u.get("approval_role", ""), u.get("approval_role", "")),
                             "Hoạt động": "Có" if u.get("active", True) else "Không",
                             "Cập nhật": u.get("updated_at", ""),
                         } for u in users])

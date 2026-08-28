@@ -126,9 +126,34 @@ class DriveGateway:
         return list(self._post("list_users", session_token=session_token).get("users") or [])
 
     def set_user(self, session_token: str, email: str, name: str, role: str, password: str = "", approval_role: str = "") -> dict[str, Any]:
+        # V6.2 compatibility: some V6.0/V6.1 Apps Script deployments used
+        # ``approval_group`` while newer builds use ``approval_role``. Send both
+        # so updating an existing deployment does not silently lose approval role.
+        effective_approval_role = str(approval_role or "").strip().upper()
+        # Theo quy ước QLDA: Admin tối thiểu có quyền phê duyệt cấp Ban QLDA.
+        # Nếu Admin không chọn phân loại riêng, tự gán PROJECT_MANAGEMENT.
+        if str(role or "").strip().lower() == "admin" and not effective_approval_role:
+            effective_approval_role = "PROJECT_MANAGEMENT"
+        legacy_group = {
+            "": "none",
+            "CONTRACTOR": "contractor",
+            "SITE_MANAGEMENT": "site_management",
+            "CONSULTANT": "tvgs",
+            "PROJECT_MANAGEMENT": "bqlda",
+        }.get(effective_approval_role, "none")
         return self._post(
             "set_user",
-            {"email": email, "name": name, "role": role, "password": password, "approval_role": approval_role},
+            {
+                "email": email,
+                "name": name,
+                "role": role,
+                "password": password,
+                "approval_role": effective_approval_role,
+                # Legacy V6.0 field/value set. This is intentionally lowercase
+                # because the old Apps Script validates: none/contractor/
+                # site_management/tvgs/bqlda.
+                "approval_group": legacy_group,
+            },
             session_token=session_token,
         )
 

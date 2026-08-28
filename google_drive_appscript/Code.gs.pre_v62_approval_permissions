@@ -35,7 +35,7 @@ function doGet(e) {
   return jsonResponse_({
     ok: true,
     service: 'QLDA Drive Gateway',
-    version: '6.2',
+    version: '6.0',
     direct_upload: true,
     max_file_bytes: MAX_DIRECT_UPLOAD_BYTES,
     message: 'Use POST JSON requests or open an upload ticket URL.'
@@ -112,8 +112,7 @@ function health_() {
     initialized: users.length > 0,
     user_count: users.length,
     root: {id: root.getId(), name: root.getName(), url: root.getUrl()},
-    version: '6.2',
-    approval_role_schema: 'approval_role+approval_group-compatible',
+    version: '6.0',
     direct_upload: true,
     max_file_bytes: MAX_DIRECT_UPLOAD_BYTES,
     max_file_gb: 2
@@ -133,7 +132,7 @@ function bootstrap_(body) {
     const email = normalizeEmail_(body.email);
     const name = String(body.name || '').trim();
     validatePassword_(body.password);
-    const u = newUser_(email, name, 'admin', String(body.password), 'PROJECT_MANAGEMENT');
+    const u = newUser_(email, name, 'admin', String(body.password));
     writeUsers_([u]);
     applyDriveRole_(email, 'admin');
     audit_('BOOTSTRAP_ADMIN', email, email, 'admin');
@@ -146,7 +145,7 @@ function bootstrap_(body) {
 function login_(body) {
   const email = normalizeEmail_(body.email);
   const password = String(body.password || '');
-  const approvalRole = normalizeApprovalRole_(body.approval_role || body.approval_group);
+  const approvalRole = normalizeApprovalRole_(body.approval_role);
   const users = readUsers_();
   const u = users.find(x => x.email === email && x.active !== false);
   if (!u || passwordHash_(u.salt, password) !== u.password_hash) {
@@ -184,8 +183,7 @@ function setUser_(body) {
   const role = normalizeRole_(body.role);
   const name = String(body.name || '').trim();
   const password = String(body.password || '');
-  let approvalRole = normalizeApprovalRole_(body.approval_role || body.approval_group);
-  if (role === 'admin' && !approvalRole) approvalRole = 'PROJECT_MANAGEMENT';
+  const approvalRole = normalizeApprovalRole_(body.approval_role);
 
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
@@ -200,7 +198,6 @@ function setUser_(body) {
       users[idx].name = name || users[idx].name || '';
       users[idx].role = role;
       users[idx].approval_role = approvalRole;
-      users[idx].approval_group = legacyApprovalGroup_(approvalRole); // alias tương thích V6.0/V6.1
       users[idx].active = true;
       users[idx].updated_at = new Date().toISOString();
       if (password) {
@@ -984,16 +981,11 @@ function audit_(action, actor, target, detail) {
 function newUser_(email, name, role, password, approvalRole) {
   const salt = randomSecret_();
   const now = new Date().toISOString();
-  const normalizedRole = normalizeRole_(role);
-  let ar = normalizeApprovalRole_(approvalRole);
-  if (normalizedRole === 'admin' && !ar) ar = 'PROJECT_MANAGEMENT';
-  return {email: email, name: name || '', role: normalizedRole, approval_role: ar, approval_group: legacyApprovalGroup_(ar), active: true, salt: salt, password_hash: passwordHash_(salt, password), created_at: now, updated_at: now};
+  return {email: email, name: name || '', role: normalizeRole_(role), approval_role: normalizeApprovalRole_(approvalRole), active: true, salt: salt, password_hash: passwordHash_(salt, password), created_at: now, updated_at: now};
 }
 
 function publicUser_(u) {
-  let ar = normalizeApprovalRole_(u.approval_role || u.approval_group || '');
-  if (String(u.role || '').toLowerCase() === 'admin' && !ar) ar = 'PROJECT_MANAGEMENT';
-  return {email: u.email, name: u.name || '', role: u.role, approval_role: ar, approval_group: legacyApprovalGroup_(ar), active: u.active !== false, created_at: u.created_at || '', updated_at: u.updated_at || ''};
+  return {email: u.email, name: u.name || '', role: u.role, approval_role: u.approval_role || '', active: u.active !== false, created_at: u.created_at || '', updated_at: u.updated_at || ''};
 }
 
 function currentUserRecord_(email) {
@@ -1008,8 +1000,7 @@ function requireSession_(body) {
   const u = currentUserRecord_(session.email);
   session.role = u.role;
   session.name = u.name || '';
-  session.approval_role = normalizeApprovalRole_(u.approval_role || u.approval_group || '');
-  if (String(u.role || '').toLowerCase() === 'admin' && !session.approval_role) session.approval_role = 'PROJECT_MANAGEMENT';
+  session.approval_role = u.approval_role || '';
   return session;
 }
 
@@ -1085,35 +1076,10 @@ function normalizeRole_(role) {
 }
 
 function normalizeApprovalRole_(role) {
-  const raw = String(role || '').trim().toUpperCase().replace(/[-\s]+/g, '_');
-  const aliases = {
-    '': '',
-    'NONE': '',
-    'CONTRACTOR': 'CONTRACTOR',
-    'SITE_MANAGEMENT': 'SITE_MANAGEMENT',
-    'EXECUTIVE': 'SITE_MANAGEMENT',
-    'BAN_DIEU_HANH': 'SITE_MANAGEMENT',
-    'CONSULTANT': 'CONSULTANT',
-    'TVGS': 'CONSULTANT',
-    'SUPERVISION': 'CONSULTANT',
-    'PROJECT_MANAGEMENT': 'PROJECT_MANAGEMENT',
-    'BQLDA': 'PROJECT_MANAGEMENT',
-    'PMB': 'PROJECT_MANAGEMENT'
-  };
-  if (!Object.prototype.hasOwnProperty.call(aliases, raw)) throw new Error('Phân loại phê duyệt không hợp lệ.');
-  return aliases[raw];
-}
-
-function legacyApprovalGroup_(role) {
-  const r = normalizeApprovalRole_(role);
-  const map = {
-    '': 'none',
-    'CONTRACTOR': 'contractor',
-    'SITE_MANAGEMENT': 'site_management',
-    'CONSULTANT': 'tvgs',
-    'PROJECT_MANAGEMENT': 'bqlda'
-  };
-  return map[r] || 'none';
+  const r = String(role || '').trim().toUpperCase();
+  const allowed = ['', 'CONTRACTOR', 'SITE_MANAGEMENT', 'CONSULTANT', 'PROJECT_MANAGEMENT'];
+  if (allowed.indexOf(r) < 0) throw new Error('Phân loại phê duyệt không hợp lệ.');
+  return r;
 }
 
 function sendApprovalEmail_(body) {

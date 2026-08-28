@@ -209,6 +209,9 @@ class CloudDatabase:
                 receiver TEXT DEFAULT '',
                 received_date TEXT DEFAULT '',
                 issue_date TEXT DEFAULT '',
+                due_date TEXT DEFAULT '',
+                priority TEXT DEFAULT '',
+                description TEXT DEFAULT '',
                 status TEXT DEFAULT 'Mới nhận',
                 related_wbs TEXT DEFAULT '',
                 reference_no TEXT DEFAULT '',
@@ -429,7 +432,12 @@ class CloudDatabase:
                     "drive_file_id": "TEXT DEFAULT ''", "drive_web_url": "TEXT DEFAULT ''", "storage_backend": "TEXT DEFAULT 'sqlite'",
                 },
                 "documents": {"note": "TEXT DEFAULT ''"},
-                "drawings": {"file_updated_at": "TEXT DEFAULT ''"},
+                "drawings": {
+                    "file_updated_at": "TEXT DEFAULT ''",
+                    "due_date": "TEXT DEFAULT ''",
+                    "priority": "TEXT DEFAULT ''",
+                    "description": "TEXT DEFAULT ''",
+                },
                 "approval_workflows": {
                     "revision_no": "INTEGER DEFAULT 0",
                     "return_stage": "TEXT DEFAULT ''",
@@ -672,8 +680,8 @@ class CloudDatabase:
             return c.execute("SELECT * FROM drawings WHERE id=?", (drawing_id,)).fetchone()
 
     def save_drawing(self, project_id: int, drawing_type: str, data: dict, drawing_id: int | None = None) -> int:
-        fields = ["drawing_no","title","discipline","revision","issuer","receiver","received_date","issue_date","status",
-                  "related_wbs","reference_no","note"]
+        fields = ["drawing_no","title","discipline","revision","issuer","receiver","received_date","issue_date","due_date",
+                  "priority","description","status","related_wbs","reference_no","note"]
         vals = [data.get(f, "") for f in fields]
         with self.connect() as c:
             if drawing_id:
