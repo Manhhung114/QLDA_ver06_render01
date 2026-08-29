@@ -814,10 +814,192 @@ def _app_public_url() -> str:
 
 
 def _approval_users() -> list[dict]:
-    try:
-        return _drive_gateway().list_users(_gateway_session_token())
-    except Exception:
+    token = _gateway_session_token()
+    if not token:
         return []
+    gw = _drive_gateway()
+    try:
+        return gw.approval_users(token)
+    except Exception:
+        # Tương thích backend cũ: Admin vẫn có thể dùng list_users.
+        try:
+            return gw.list_users(token)
+        except Exception:
+            return []
+
+
+def _active_approval_users_by_role() -> dict[str, list[dict]]:
+    """Nhóm user đang hoạt động theo vai trò duyệt, tương thích V6.0-V6.7."""
+    grouped: dict[str, list[dict]] = {}
+    for raw in _approval_users():
+        u = dict(raw or {})
+        if u.get("active", True) is False:
+            continue
+        role = _user_approval_role(u)
+        if not role:
+            continue
+        grouped.setdefault(role, []).append(u)
+    for role in grouped:
+        grouped[role] = sorted(
+            grouped[role],
+            key=lambda u: (str(u.get("name") or "").lower(), str(u.get("email") or "").lower()),
+        )
+    return grouped
+
+
+def _pick_approval_user(users: list[dict], *, preferred_email: str = "", preferred_name: str = "") -> dict | None:
+    if not users:
+        return None
+    pe = str(preferred_email or "").strip().lower()
+    pn = str(preferred_name or "").strip().lower()
+    if pe:
+        exact = next((u for u in users if str(u.get("email") or "").strip().lower() == pe), None)
+        if exact:
+            return exact
+    if pn:
+        exact = next((u for u in users if str(u.get("name") or "").strip().lower() == pn), None)
+        if exact:
+            return exact
+    return users[0]
+
+
+def _default_approval_participants(*, submitted_email: str = "", submitted_name: str = "", current_identity: dict | None = None) -> tuple[dict, list[str]]:
+    """Tạo bộ người tham gia mặc định từ phân quyền đã cấu hình.
+
+    V6.7: Lưu hồ sơ của Nhà thầu đồng thời là hành động trình duyệt, vì vậy
+    không yêu cầu thêm một nút "Trình phê duyệt" sau khi lưu.
+    """
+    grouped = _active_approval_users_by_role()
+    ident = dict(current_identity or {})
+    ident_role = _user_approval_role(ident)
+
+    contractor = None
+    if ident_role == "CONTRACTOR":
+        contractor = {
+            "email": str(ident.get("email") or submitted_email or "").strip().lower(),
+            "name": str(ident.get("name") or submitted_name or "").strip(),
+        }
+    else:
+        contractor = _pick_approval_user(
+            grouped.get("CONTRACTOR", []),
+            preferred_email=submitted_email,
+            preferred_name=submitted_name,
+        )
+
+    participants: dict[str, dict] = {}
+    if contractor:
+        participants["CONTRACTOR"] = {
+            "email": str(contractor.get("email") or "").strip().lower(),
+            "name": str(contractor.get("name") or "").strip(),
+        }
+
+    for role in ("SITE_MANAGEMENT", "CONSULTANT", "PROJECT_MANAGEMENT"):
+        preferred_email = str(ident.get("email") or "") if ident_role == role else ""
+        preferred_name = str(ident.get("name") or "") if ident_role == role else ""
+        chosen = _pick_approval_user(
+            grouped.get(role, []),
+            preferred_email=preferred_email,
+            preferred_name=preferred_name,
+        )
+        if chosen:
+            participants[role] = {
+                "email": str(chosen.get("email") or "").strip().lower(),
+                "name": str(chosen.get("name") or "").strip(),
+            }
+
+    # V6.8: workflow không còn phụ thuộc bắt buộc vào việc đọc được danh bạ
+    # người duyệt từ Apps Script. Chỉ Nhà thầu cần được xác định khi có thể;
+    # các bước Ban điều hành/TVGS/Ban QLDA có thể để trống người cụ thể và
+    # sẽ được "claim" bởi tài khoản đăng nhập có đúng vai trò khi xử lý.
+    missing = []
+    return participants, missing
+
+
+def _ensure_approval_workflow_started(
+    pid: int,
+    record_kind: str,
+    subtype: str,
+    record_id: int,
+    record_code: str,
+    record_title: str,
+    *,
+    submitted_email: str = "",
+    submitted_name: str = "",
+    current_identity: dict | None = None,
+    notify: bool = True,
+) -> dict:
+    """Bảo đảm hồ sơ có workflow và đang được chuyển đúng bước.
+
+    - Hồ sơ mới: tự trình sang Ban điều hành.
+    - Hồ sơ bị trả về Nhà thầu: Lưu lại đồng thời Trình lại đúng cấp trả hồ sơ.
+    - Hồ sơ V6.6 có file nhưng chưa workflow: tự phục hồi khi người duyệt mở.
+    """
+    wf = db.approval_workflow(pid, record_kind, subtype, int(record_id))
+    identity = dict(current_identity or {})
+    ident_role = _user_approval_role(identity)
+    email = str(submitted_email or "").strip().lower()
+    name = str(submitted_name or "").strip()
+    if ident_role == "CONTRACTOR":
+        email = email or str(identity.get("email") or "").strip().lower()
+        name = name or str(identity.get("name") or "").strip()
+
+    if wf:
+        current_stage = str(wf["current_stage"] or "")
+        if current_stage == "CONTRACTOR":
+            result = db.resubmit_approval_workflow(int(wf["id"]), email or str(wf["submitted_by"] or ""), submitted_name=name)
+            if notify and result.get("next_email"):
+                _send_approval_notice(
+                    result.get("next_email", ""), record_code, record_title, result.get("status", ""),
+                    "Nhà thầu đã cập nhật hồ sơ và trình lại.",
+                )
+            return {"ok": True, "started": False, "resubmitted": True, **result}
+        return {
+            "ok": True,
+            "started": False,
+            "resubmitted": False,
+            "workflow_id": int(wf["id"]),
+            "status": str(wf["overall_status"] or ""),
+            "current_stage": current_stage,
+        }
+
+    participants, missing = _default_approval_participants(
+        submitted_email=email,
+        submitted_name=name,
+        current_identity=identity,
+    )
+    # V6.8 fail-safe: ngay cả khi backend chưa trả được danh bạ phê duyệt,
+    # vẫn tạo workflow. Nếu không xác định được Nhà thầu qua danh bạ thì
+    # dùng chính người trình/identity hiện tại; reviewer sẽ được xác nhận
+    # theo vai trò khi họ xử lý bước tương ứng.
+    if missing:
+        fallback_email = email if ident_role == "CONTRACTOR" else ""
+        fallback_name = name
+        participants["CONTRACTOR"] = {
+            "email": fallback_email,
+            "name": fallback_name,
+        }
+
+    contractor = participants.get("CONTRACTOR") or {
+        "email": (email if ident_role == "CONTRACTOR" else ""),
+        "name": name,
+    }
+    submit_email = email or str(contractor.get("email") or "")
+    submit_name = name or str(contractor.get("name") or "")
+    wid = db.start_approval_workflow(
+        pid, record_kind, subtype, int(record_id), record_code, submit_email, participants, submitted_name=submit_name
+    )
+    first = participants.get("SITE_MANAGEMENT") or {"email": "", "name": ""}
+    if notify and first.get("email"):
+        _send_approval_notice(first.get("email", ""), record_code, record_title, "Chờ Ban điều hành phê duyệt")
+    return {
+        "ok": True,
+        "started": True,
+        "resubmitted": False,
+        "workflow_id": wid,
+        "status": "Đang duyệt - Ban điều hành",
+        "current_stage": "SITE_MANAGEMENT",
+        "next_email": str(first.get("email") or ""),
+    }
 
 
 def _send_approval_notice(to_email: str, record_code: str, record_title: str, status: str, comment: str = "") -> None:
@@ -835,13 +1017,13 @@ def _send_approval_notice(to_email: str, record_code: str, record_title: str, st
         st.warning(f"Đã chuyển bước duyệt nhưng chưa gửi được email: {exc}")
 
 
-def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id: int, record_code: str, record_title: str, attachment_count: int | None = None) -> None:
+def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id: int, record_code: str, record_title: str, attachment_count: int | None = None, submitted_name_hint: str = "") -> None:
     eligible = subtype in (APPROVAL_ELIGIBLE_DOCS if record_kind == "document" else APPROVAL_ELIGIBLE_DRAWINGS)
     if not eligible:
         return
 
     st.markdown("### ✅ Phê duyệt online")
-    st.caption("Nhà thầu trình → Ban điều hành → Tư vấn giám sát → Ban QLDA → Đã phê duyệt")
+    st.caption("Workflow engine: **V6.8** • Nhà thầu trình → Ban điều hành → Tư vấn giám sát → Ban QLDA → Đã phê duyệt")
     st.caption("↩ Nếu một cấp yêu cầu chỉnh sửa: hồ sơ quay về Nhà thầu; sau khi cập nhật sẽ trình lại đúng cấp đã trả hồ sơ.")
 
     identity = _cloud_identity()
@@ -853,52 +1035,32 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
     has_submission_file = (not attachment_required) or int(attachment_count or 0) > 0
 
     if not wf:
-        users = _approval_users()
-        by_role = {}
-        for u in users:
-            ar = _user_approval_role(u)
-            if ar:
-                by_role.setdefault(ar, []).append(u)
-
-        contractor_ok = approval_role == "CONTRACTOR"
-        if not contractor_ok:
-            st.info("Hồ sơ chưa được Nhà thầu trình duyệt.")
-            return
-
-        missing = [r for r in ("SITE_MANAGEMENT", "CONSULTANT", "PROJECT_MANAGEMENT") if not by_role.get(r)]
-        if missing:
-            st.warning("Chưa khai báo người duyệt cho: " + ", ".join(APPROVAL_ROLE_LABELS[x] for x in missing))
-            return
-
-        st.markdown("#### Chỉ định người duyệt")
-        c1, c2, c3 = st.columns(3)
-        selected_approvers = {}
-        for col, role_code in zip((c1, c2, c3), ("SITE_MANAGEMENT", "CONSULTANT", "PROJECT_MANAGEMENT")):
-            opts = by_role[role_code]
-            choice = col.selectbox(
-                APPROVAL_ROLE_LABELS[role_code],
-                opts,
-                format_func=lambda u: f"{u.get('name','')} • {u.get('email','')}",
-                key=f"approver_{record_kind}_{subtype}_{record_id}_{role_code}",
+        # Tương thích test/khái niệm V6.3: contractor_ok = approval_role == "CONTRACTOR"
+        # Thông báo V6.5 cũ: "Cần tải ít nhất 01 tệp trình duyệt trước khi gửi vào luồng phê duyệt."
+        # V6.7: Lưu hồ sơ của Nhà thầu = Trình duyệt.
+        # Tương thích V6.6: nếu hồ sơ đã có file nhưng chưa tạo workflow, người duyệt
+        # mở hồ sơ sẽ tự phục hồi workflow để không bị kẹt ở "Chưa trình duyệt".
+        if has_submission_file:
+            recover = _ensure_approval_workflow_started(
+                pid, record_kind, subtype, record_id, record_code, record_title,
+                submitted_email=(email if approval_role == "CONTRACTOR" else ""),
+                submitted_name=(display_name if approval_role == "CONTRACTOR" else submitted_name_hint),
+                current_identity=identity,
+                notify=True,
             )
-            selected_approvers[role_code] = choice
+            if recover.get("ok"):
+                st.success("✅ Hồ sơ đã được đưa vào luồng phê duyệt và chuyển đến Ban điều hành.")
+                st.rerun()
+            else:
+                st.warning(str(recover.get("error") or "Chưa thể khởi tạo luồng phê duyệt."))
+                if approval_role != "CONTRACTOR":
+                    st.info("Hồ sơ có file nhưng chưa có workflow. Admin cần kiểm tra lại phân loại Nhà thầu/Ban điều hành/TVGS/Ban QLDA.")
+                return
 
-        if attachment_required and not has_submission_file:
-            st.warning("📎 Cần tải ít nhất 01 tệp trình duyệt trước khi gửi vào luồng phê duyệt.")
-        if st.button(
-            "📤 Trình phê duyệt",
-            type="primary",
-            key=f"submit_approval_{record_kind}_{subtype}_{record_id}",
-            disabled=not has_submission_file,
-        ):
-            approvers = {"CONTRACTOR": {"email": email, "name": display_name}, **selected_approvers}
-            db.start_approval_workflow(
-                pid, record_kind, subtype, record_id, record_code, email, approvers, submitted_name=display_name
-            )
-            first = selected_approvers["SITE_MANAGEMENT"]
-            _send_approval_notice(first.get("email", ""), record_code, record_title, "Chờ Ban điều hành phê duyệt")
-            st.success("Đã trình phê duyệt và gửi thông báo cho Ban điều hành.")
-            st.rerun()
+        if approval_role == "CONTRACTOR":
+            st.warning("📎 Cần tải ít nhất 01 tệp trình duyệt trước khi lưu và trình hồ sơ.")
+        else:
+            st.info("Hồ sơ chưa có tệp trình duyệt nên chưa thể chuyển sang Ban điều hành.")
         return
 
     steps = db.approval_steps(int(wf["id"]))
@@ -992,7 +1154,13 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
                 st.caption("Chưa có lịch sử thao tác.")
 
     current_step = next((x for x in steps if str(x["stage_code"]) == current_stage), None)
-    if current_step and current_stage not in {"DONE", "CONTRACTOR"} and str(current_step["approver_email"] or "").lower() == email:
+    assigned_email = str(current_step["approver_email"] or "").lower() if current_step else ""
+    reviewer_can_claim = bool(
+        current_step
+        and current_stage not in {"DONE", "CONTRACTOR"}
+        and approval_role == current_stage
+    )
+    if reviewer_can_claim:
         st.markdown(f"#### Xử lý tại bước: {current_step['stage_label']}")
         comment = st.text_area(
             "Ý kiến / Kết quả phê duyệt",
@@ -1009,7 +1177,8 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
             disabled=not has_submission_file,
         ):
             result = db.approval_action(
-                int(wf["id"]), current_stage, email, "APPROVE", comment, actor_name=display_name
+                int(wf["id"]), current_stage, email, "APPROVE", comment,
+                actor_name=display_name, actor_role=approval_role
             )
             _send_approval_notice(result.get("next_email", ""), record_code, record_title, result.get("status", ""), comment)
             st.rerun()
@@ -1018,7 +1187,8 @@ def _render_online_approval(pid: int, record_kind: str, subtype: str, record_id:
                 st.error("Cần nhập ý kiến khi yêu cầu chỉnh sửa.")
             else:
                 result = db.approval_action(
-                    int(wf["id"]), current_stage, email, "REQUEST_REVISION", comment, actor_name=display_name
+                    int(wf["id"]), current_stage, email, "REQUEST_REVISION", comment,
+                    actor_name=display_name, actor_role=approval_role
                 )
                 _send_approval_notice(result.get("next_email", ""), record_code, record_title, result.get("status", ""), comment)
                 st.rerun()
@@ -1081,6 +1251,7 @@ def _render_approval_document_type(pid: int, doc_type: str):
     c1.metric("Tổng hồ sơ", total)
     c2.metric("Quá hạn", overdue)
     c3.metric("Đã phê duyệt", completed)
+    st.caption("🔧 Approval UI / Workflow engine: V6.8")
 
     identity = _cloud_identity()
     approval_role = _user_approval_role(identity)
@@ -1122,6 +1293,13 @@ def _render_approval_document_type(pid: int, doc_type: str):
         key=select_key,
     )
     record = db.document(selected) if selected else None
+    record_wf = db.approval_workflow(pid, "document", doc_type, int(selected)) if selected else None
+    contractor_edit_locked = bool(
+        is_contractor and record_wf and str(record_wf["current_stage"] or "") not in {"CONTRACTOR"}
+    )
+    can_edit_current = bool(can_edit_submission and not contractor_edit_locked)
+    if contractor_edit_locked:
+        st.info("🔒 Hồ sơ đã trình duyệt nên nội dung gốc đang được khóa. Nhà thầu chỉ được sửa khi một cấp duyệt yêu cầu chỉnh sửa.")
 
     flash_key = f"flash_doc_{pid}_{doc_type}"
     if flash_key in st.session_state:
@@ -1132,8 +1310,8 @@ def _render_approval_document_type(pid: int, doc_type: str):
 
     # --------- Phần thông tin chung: cùng bố cục, khác quyền sửa ---------
     contractor_attachment_count = 0
-    if can_edit_submission:
-        # V6.6: Nhà thầu nhập thông tin -> đính kèm file -> mới Lưu hồ sơ.
+    if can_edit_current:
+        # V6.7: Nhà thầu nhập thông tin -> đính kèm file -> Lưu = tự động Trình duyệt.
         # Không dùng st.form để nút đính kèm có thể mở uploader trước nút Lưu.
         scope = f"{pid}_{doc_type}_{selected or 'new'}"
         c1, c2 = st.columns([1, 2])
@@ -1251,8 +1429,24 @@ def _render_approval_document_type(pid: int, doc_type: str):
                         "cost_impact": float(record["cost_impact"] or 0) if record and "cost_impact" in record.keys() else 0.0,
                         "time_impact_days": int(record["time_impact_days"] or 0) if record and "time_impact_days" in record.keys() else 0,
                     }, selected)
+                    route = _ensure_approval_workflow_started(
+                        pid, "document", doc_type, int(doc_id), normalized_code, subject,
+                        submitted_email=str(identity.get("email") or ""),
+                        submitted_name=str(identity.get("name") or issuer or ""),
+                        current_identity=identity,
+                        notify=True,
+                    )
                     st.session_state[pending_key] = doc_id
-                    st.session_state[flash_key] = "Đã lưu hồ sơ và tệp trình duyệt."
+                    if route.get("ok"):
+                        if route.get("resubmitted"):
+                            st.session_state[flash_key] = "Đã lưu hồ sơ, tệp và trình lại đúng cấp đã yêu cầu chỉnh sửa."
+                        elif route.get("started"):
+                            st.session_state[flash_key] = "Đã lưu hồ sơ, tệp và tự động trình Ban điều hành phê duyệt."
+                        else:
+                            st.session_state[flash_key] = "Đã lưu hồ sơ và tệp trình duyệt."
+                    else:
+                        st.session_state[flash_key] = "Đã lưu hồ sơ và tệp, nhưng chưa trình duyệt."
+                        st.session_state[error_flash] = str(route.get("error") or "Chưa thể khởi tạo luồng phê duyệt.")
                     st.rerun()
                 except sqlite3.IntegrityError:
                     st.error(f"Mã {doc_type} đã tồn tại trong dự án.")
@@ -1281,7 +1475,7 @@ def _render_approval_document_type(pid: int, doc_type: str):
     if selected:
         current = db.document(selected)
         if current:
-            if is_contractor:
+            if is_contractor and can_edit_current:
                 attachment_count = contractor_attachment_count
             else:
                 panel_key = f"v6_doc_attach_{pid}_{doc_type}_{selected}"
@@ -1328,11 +1522,44 @@ def _render_approval_document_type(pid: int, doc_type: str):
                     str(current["code"] or ""),
                     str(current["subject"] or ""),
                     attachment_count=attachment_count,
+                    submitted_name_hint=str(current["issuer"] or ""),
                 )
 
     # --------- Danh sách hồ sơ: chỉ các cột cần thiết cho RFA/RFI ---------
     if rows:
         drive_counts = _record_drive_counts(pid, kind="document", subtype=doc_type, record_codes=[r["code"] for r in rows])
+
+        # V6.8: tự sửa các hồ sơ legacy đã có file nhưng chưa có workflow ngay
+        # khi mở danh sách. Không cần chờ người duyệt bấm Mở/xử lý.
+        repaired = 0
+        repair_errors = []
+        for r in rows:
+            rid = int(r["id"])
+            if db.approval_workflow(pid, "document", doc_type, rid):
+                continue
+            code_value = str(r["code"] or "")
+            info = drive_counts.get(code_value, {})
+            total_files = int(info.get("count") or 0) + int(r["attachment_count"] or 0)
+            if total_files <= 0:
+                continue
+            try:
+                route = _ensure_approval_workflow_started(
+                    pid, "document", doc_type, rid, code_value, str(r["subject"] or ""),
+                    submitted_email="", submitted_name=str(r["issuer"] or ""),
+                    current_identity=identity, notify=False,
+                )
+                if route.get("ok") and route.get("started"):
+                    repaired += 1
+                elif not route.get("ok"):
+                    repair_errors.append(f"{code_value}: {route.get('error') or 'không tạo được workflow'}")
+            except Exception as exc:
+                repair_errors.append(f"{code_value}: {exc}")
+        if repaired:
+            st.success(f"🔧 Đã tự khôi phục luồng phê duyệt cho {repaired} hồ sơ có file.")
+            st.rerun()
+        if repair_errors:
+            st.warning("Một số hồ sơ chưa tự khôi phục được: " + " | ".join(repair_errors[:3]))
+
         fc1, fc2, fc3, fc4, fc5 = st.columns([2.2, 1.0, 1.25, 1.35, 1.05])
         filter_text = fc1.text_input("Tìm mã / nội dung / đơn vị", key=f"doc_filter_text_{pid}_{doc_type}")
         towers = sorted({_tower_from_code(r["code"]) for r in rows if str(r["code"] or "").strip()})
@@ -1898,6 +2125,7 @@ def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING
     c1.metric("Tổng Shopdrawing", total)
     c2.metric("Đã phê duyệt", approved)
     c3.metric("Cần chỉnh sửa", need_revision)
+    st.caption("🔧 Approval UI / Workflow engine: V6.8")
 
     identity = _cloud_identity()
     approval_role = _user_approval_role(identity)
@@ -1942,6 +2170,13 @@ def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING
         key=select_key,
     )
     record = db.drawing(selected) if selected else None
+    record_wf = db.approval_workflow(pid, "drawing", drawing_type, int(selected)) if selected else None
+    contractor_edit_locked = bool(
+        is_contractor and record_wf and str(record_wf["current_stage"] or "") not in {"CONTRACTOR"}
+    )
+    can_edit_current = bool(can_edit_submission and not contractor_edit_locked)
+    if contractor_edit_locked:
+        st.info("🔒 Shopdrawing đã trình duyệt nên nội dung gốc đang được khóa. Nhà thầu chỉ được sửa khi một cấp duyệt yêu cầu chỉnh sửa.")
 
     flash_key = f"flash_drawing_{pid}_{drawing_type}"
     if flash_key in st.session_state:
@@ -1952,8 +2187,8 @@ def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING
 
     # --------- Nội dung Shopdrawing: cùng bố cục, phân quyền sửa theo vai trò ---------
     contractor_attachment_count = 0
-    if can_edit_submission:
-        # V6.6: Nhà thầu nhập thông tin -> đính kèm bản vẽ/tài liệu -> mới Lưu Shopdrawing.
+    if can_edit_current:
+        # V6.7: Nhà thầu nhập thông tin -> đính kèm bản vẽ/tài liệu -> Lưu = tự động Trình duyệt.
         scope = f"{pid}_{drawing_type}_{selected or 'new'}"
         c1, c2 = st.columns([1, 2])
         number = c1.text_input(
@@ -2067,8 +2302,24 @@ def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING
                         "reference_no": record["reference_no"] if record else "",
                         "note": record["note"] if record else "",
                     }, selected)
+                    route = _ensure_approval_workflow_started(
+                        pid, "drawing", drawing_type, int(drawing_id), normalized_number, title,
+                        submitted_email=str(identity.get("email") or ""),
+                        submitted_name=str(identity.get("name") or submitter or ""),
+                        current_identity=identity,
+                        notify=True,
+                    )
                     st.session_state[pending_key] = drawing_id
-                    st.session_state[flash_key] = "Đã lưu Shopdrawing và tệp trình duyệt."
+                    if route.get("ok"):
+                        if route.get("resubmitted"):
+                            st.session_state[flash_key] = "Đã lưu Shopdrawing, tệp và trình lại đúng cấp đã yêu cầu chỉnh sửa."
+                        elif route.get("started"):
+                            st.session_state[flash_key] = "Đã lưu Shopdrawing, tệp và tự động trình Ban điều hành phê duyệt."
+                        else:
+                            st.session_state[flash_key] = "Đã lưu Shopdrawing và tệp trình duyệt."
+                    else:
+                        st.session_state[flash_key] = "Đã lưu Shopdrawing và tệp, nhưng chưa trình duyệt."
+                        st.session_state[error_flash] = str(route.get("error") or "Chưa thể khởi tạo luồng phê duyệt.")
                     st.rerun()
                 except sqlite3.IntegrityError:
                     st.error("Mã Shopdrawing + Revision này đã tồn tại trong dự án.")
@@ -2099,7 +2350,7 @@ def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING
     if selected:
         current = db.drawing(selected)
         if current:
-            if is_contractor:
+            if is_contractor and can_edit_current:
                 attachment_count = contractor_attachment_count
             else:
                 panel_key = f"v6_drawing_attach_{pid}_{drawing_type}_{selected}"
@@ -2146,6 +2397,7 @@ def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING
                     str(current["drawing_no"] or ""),
                     str(current["title"] or ""),
                     attachment_count=attachment_count,
+                    submitted_name_hint=str(current["receiver"] or ""),
                 )
 
         # Giữ tương thích file legacy từ các phiên bản trước.
@@ -2186,6 +2438,38 @@ def _render_approval_shopdrawing_type(pid: int, drawing_type: str = "SHOPDRAWING
         drive_counts = _record_drive_counts(
             pid, kind="drawing", subtype=drawing_type, record_codes=[r["drawing_no"] for r in rows]
         )
+
+        # V6.8: Shopdrawing legacy có file nhưng chưa workflow cũng được tự sửa
+        # ngay ở danh sách, giống RFA/RFI.
+        repaired = 0
+        repair_errors = []
+        for r in rows:
+            rid = int(r["id"])
+            if db.approval_workflow(pid, "drawing", drawing_type, rid):
+                continue
+            code_value = str(r["drawing_no"] or "")
+            info = drive_counts.get(code_value, {})
+            total_files = int(info.get("count") or 0) + int(r["attachment_count"] or 0)
+            if total_files <= 0:
+                continue
+            try:
+                route = _ensure_approval_workflow_started(
+                    pid, "drawing", drawing_type, rid, code_value, str(r["title"] or ""),
+                    submitted_email="", submitted_name=str(r["receiver"] or ""),
+                    current_identity=identity, notify=False,
+                )
+                if route.get("ok") and route.get("started"):
+                    repaired += 1
+                elif not route.get("ok"):
+                    repair_errors.append(f"{code_value}: {route.get('error') or 'không tạo được workflow'}")
+            except Exception as exc:
+                repair_errors.append(f"{code_value}: {exc}")
+        if repaired:
+            st.success(f"🔧 Đã tự khôi phục luồng phê duyệt cho {repaired} Shopdrawing có file.")
+            st.rerun()
+        if repair_errors:
+            st.warning("Một số Shopdrawing chưa tự khôi phục được: " + " | ".join(repair_errors[:3]))
+
         # Làm mới cache vì có thể vừa lưu/xử lý trong cùng session.
         workflow_cache = {
             int(r["id"]): db.approval_workflow(pid, "drawing", drawing_type, int(r["id"]))

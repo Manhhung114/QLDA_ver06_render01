@@ -869,7 +869,7 @@ class CloudDatabase:
                 "revision_no": int(wf["revision_no"] or 0),
             }
 
-    def approval_action(self, workflow_id: int, stage_code: str, actor_email: str, action: str, comment: str, actor_name: str = ""):
+    def approval_action(self, workflow_id: int, stage_code: str, actor_email: str, action: str, comment: str, actor_name: str = "", actor_role: str = ""):
         now = _now()
         action = action.upper().strip()
         with self.connect() as c:
@@ -884,8 +884,28 @@ class CloudDatabase:
             ).fetchone()
             if not step:
                 raise ValueError("Không tìm thấy bước duyệt.")
-            if str(step["approver_email"] or "").lower() != str(actor_email or "").lower():
+            assigned_email = str(step["approver_email"] or "").lower()
+            actor_email_norm = str(actor_email or "").lower()
+            actor_role_norm = str(actor_role or "").strip().upper()
+            # V6.8: định tuyến theo vai trò. Nếu workflow cũ/chưa đọc được danh bạ
+            # nên approver_email đang trống, người đăng nhập đúng vai trò của bước
+            # được quyền nhận (claim) và xử lý. Nếu đã gán email cụ thể thì vẫn
+            # chỉ người đó được xử lý, trừ trường hợp dữ liệu legacy trống.
+            expected_role = str(stage_code or "").strip().upper()
+            if actor_role_norm:
+                if actor_role_norm != expected_role:
+                    raise PermissionError("Tài khoản hiện tại không đúng vai trò của bước phê duyệt này.")
+            elif assigned_email != actor_email_norm:
+                # Tương thích lời gọi legacy/test chưa truyền actor_role.
                 raise PermissionError("Bạn không phải người được chỉ định duyệt bước này.")
+            # Vai trò là nguồn phân quyền chính. Người hiện tại xử lý bước sẽ được
+            # ghi nhận vào approver_email/name, kể cả workflow legacy đã gán một
+            # email khác cùng vai trò.
+            if assigned_email != actor_email_norm or not str(step["approver_name"] or "").strip():
+                c.execute(
+                    "UPDATE approval_steps SET approver_email=?,approver_name=? WHERE id=?",
+                    (actor_email_norm, actor_name, step["id"]),
+                )
             if str(step["status"] or "") != "Đang chờ duyệt":
                 raise ValueError("Bước này đã được xử lý hoặc chưa đến lượt duyệt.")
 
