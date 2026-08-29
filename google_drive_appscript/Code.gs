@@ -35,7 +35,7 @@ function doGet(e) {
   return jsonResponse_({
     ok: true,
     service: 'QLDA Drive Gateway',
-    version: '6.7',
+    version: '6.11',
     direct_upload: true,
     max_file_bytes: MAX_DIRECT_UPLOAD_BYTES,
     message: 'Use POST JSON requests or open an upload ticket URL.'
@@ -113,7 +113,7 @@ function health_() {
     initialized: users.length > 0,
     user_count: users.length,
     root: {id: root.getId(), name: root.getName(), url: root.getUrl()},
-    version: '6.7',
+    version: '6.11',
     approval_role_schema: 'approval_role+approval_group-compatible',
     direct_upload: true,
     max_file_bytes: MAX_DIRECT_UPLOAD_BYTES,
@@ -282,7 +282,7 @@ function changePassword_(body) {
 // -----------------------------------------------------------------------------
 
 function createUploadTicket_(body) {
-  const session = requireRole_(body, ['update', 'admin']);
+  const session = requireUploadRole_(body);
   const target = ensureRecordFolderFromBody_(body);
   const requestedMax = Number(body.max_bytes || MAX_DIRECT_UPLOAD_BYTES);
   const maxBytes = Math.min(MAX_DIRECT_UPLOAD_BYTES, Math.max(1, requestedMax));
@@ -291,6 +291,8 @@ function createUploadTicket_(body) {
     v: 2,
     email: session.email,
     role: session.role,
+    approval_role: String(session.approval_role || ''),
+    upload_purpose: String(body.upload_purpose || ''),
     folder_id: target.getId(),
     folder_url: target.getUrl(),
     project_code: sanitizeName_(body.project_code || 'DU_AN'),
@@ -810,7 +812,7 @@ function fileInfoObject_(file, folderUrl) {
 // -----------------------------------------------------------------------------
 
 function uploadLegacy_(body) {
-  const session = requireRole_(body, ['update', 'admin']);
+  const session = requireUploadRole_(body);
   const fileName = sanitizeFileName_(body.file_name || 'file.bin');
   const mimeType = String(body.mime_type || 'application/octet-stream');
   const encoded = String(body.file_base64 || '');
@@ -1029,6 +1031,32 @@ function requireRole_(body, allowed) {
   const s = requireSession_(body);
   if (allowed.indexOf(s.role) < 0) throw new Error('Bạn không có quyền thực hiện chức năng này.');
   return s;
+}
+
+// V6.11: quyền upload riêng cho Nhà thầu trong luồng phê duyệt online.
+// Tài khoản hệ thống 'read' vẫn được upload CHỈ khi approval_role=CONTRACTOR,
+// purpose=approval_submission và subtype thuộc nhóm được duyệt online.
+function isApprovalSubmissionTarget_(body) {
+  const purpose = String(body.upload_purpose || '').trim().toLowerCase();
+  const kind = String(body.kind || '').trim().toLowerCase();
+  const subtype = String(body.subtype || '').trim().toUpperCase();
+  const recordCode = String(body.record_code || '').trim().toUpperCase();
+  if (purpose !== 'approval_submission') return false;
+  // Chỉ cho upload vào mã hồ sơ chuẩn THÁP-BỘMÔN-STT, ví dụ S2-MEP-002.
+  if (!/^[A-Z]+\d+-[A-Z0-9]+-\d{3,}$/.test(recordCode)) return false;
+  if (kind === 'document') return ['RFA','RFI'].indexOf(subtype) >= 0;
+  if (kind === 'drawing') return ['SHOPDRAWING','AS_BUILT'].indexOf(subtype) >= 0;
+  return false;
+}
+
+function requireUploadRole_(body) {
+  const s = requireSession_(body);
+  if (['update','admin'].indexOf(String(s.role || '').toLowerCase()) >= 0) return s;
+  const approvalRole = normalizeApprovalRole_(s.approval_role || '');
+  if (String(s.role || '').toLowerCase() === 'read' && approvalRole === 'CONTRACTOR' && isApprovalSubmissionTarget_(body)) {
+    return s;
+  }
+  throw new Error('Bạn không có quyền tải file. Nhà thầu chỉ được tải file cho RFA/RFI/Shopdrawing/Hoàn công trong luồng phê duyệt online.');
 }
 
 function makeSessionToken_(u) {

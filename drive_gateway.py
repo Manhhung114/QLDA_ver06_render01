@@ -191,6 +191,7 @@ class DriveGateway:
         kind: str,
         subtype: str,
         record_code: str,
+        upload_purpose: str = "",
     ) -> dict[str, Any]:
         """Create a short-lived uploader URL.
 
@@ -205,6 +206,7 @@ class DriveGateway:
                 "kind": kind,
                 "subtype": subtype,
                 "record_code": record_code,
+                "upload_purpose": str(upload_purpose or ""),
                 "max_bytes": self.config.direct_max_upload_mb * 1024 * 1024,
                 "webapp_url": self.config.webapp_url,
             },
@@ -280,6 +282,7 @@ class DriveGateway:
         name: str,
         content: bytes,
         mime_type: str = "",
+        upload_purpose: str = "",
     ) -> dict[str, Any]:
         if len(content) > self.config.legacy_max_upload_mb * 1024 * 1024:
             size_mb = len(content) / (1024 * 1024)
@@ -297,6 +300,7 @@ class DriveGateway:
                 "record_code": record_code,
                 "file_name": name,
                 "mime_type": mime_type or "application/octet-stream",
+                "upload_purpose": str(upload_purpose or ""),
                 "file_base64": encoded,
             },
             session_token=session_token,
